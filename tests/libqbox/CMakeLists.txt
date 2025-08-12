@@ -167,3 +167,5 @@ endfunction(qbox_extra_add_test)
 add_subdirectory(display)
 
 add_subdirectory(hexagon)
+
+add_subdirectory(virtio)
