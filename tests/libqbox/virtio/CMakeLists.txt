@@ -104,9 +104,25 @@ target_link_libraries(virtio_mmio_net_test PRIVATE
     reset_gpio
     ${TARGET_LIBS})
 
+add_executable(virtio_mmio_sound_test virtio_mmio_sound_test.cc)
+install(TARGETS virtio_mmio_sound_test DESTINATION bin)
+target_include_directories(virtio_mmio_sound_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/tests/libqbox/include
+    ${PROJECT_SOURCE_DIR}/qemu-components/common/include
+    ${PROJECT_SOURCE_DIR}/qemu-components/reset_gpio/include
+    ${PROJECT_SOURCE_DIR}/systemc-components/common/include)
+target_link_libraries(virtio_mmio_sound_test PRIVATE
+    virtio_mmio_sound
+    router
+    gs_memory
+    reset_gpio
+    ${TARGET_LIBS})
+
 add_test(NAME virtio_mmio_blk_test
     COMMAND $<TARGET_FILE:virtio_mmio_blk_test>)
 add_test(NAME virtio_mmio_net_test
     COMMAND $<TARGET_FILE:virtio_mmio_net_test>)
+add_test(NAME virtio_mmio_sound_test
+    COMMAND $<TARGET_FILE:virtio_mmio_sound_test>)
 add_test(NAME virtio_guest_driven_block_test
     COMMAND $<TARGET_FILE:virtio_guest_driven_block_test> --param test-bench.num_cpu=8)
