@@ -1,3 +1,19 @@
+# virtio_mmio_blk_reset_test.cc removed - functionality merged into virtio_guest_driven_block_test.cc
+
+add_executable(virtio_mmio_blk_test virtio_mmio_blk_test.cc)
+install(TARGETS virtio_mmio_blk_test DESTINATION bin)
+target_include_directories(virtio_mmio_blk_test PRIVATE
+    ${PROJECT_SOURCE_DIR}/tests/libqbox/include
+    ${PROJECT_SOURCE_DIR}/qemu-components/common/include
+    ${PROJECT_SOURCE_DIR}/qemu-components/reset_gpio/include
+    ${PROJECT_SOURCE_DIR}/systemc-components/common/include)
+target_link_libraries(virtio_mmio_blk_test PRIVATE
+    virtio_mmio_blk
+    router
+    gs_memory
+    reset_gpio
+    ${TARGET_LIBS})
+
 # Build VirtIO guest firmware using LLVM toolchain
 set(FIRMWARE_ASM ${CMAKE_CURRENT_SOURCE_DIR}/virtio_guest_firmware.s)
 set(FIRMWARE_OBJ ${CMAKE_CURRENT_BINARY_DIR}/virtio_guest_firmware.o)
@@ -74,5 +90,7 @@ target_compile_definitions(virtio_guest_driven_block_test PRIVATE
     FIRMWARE_QUEUE_MEMORY_BASE=${QUEUE_MEMORY_BASE}
     FIRMWARE_DATA_BUFFER_BASE=${DATA_BUFFER_BASE})
 
+add_test(NAME virtio_mmio_blk_test
+    COMMAND $<TARGET_FILE:virtio_mmio_blk_test>)
 add_test(NAME virtio_guest_driven_block_test
     COMMAND $<TARGET_FILE:virtio_guest_driven_block_test> --param test-bench.num_cpu=8)
