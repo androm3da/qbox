@@ -49,13 +49,22 @@ public:
                            "If true, provide the CPU with "
                            "a rdtime register")
         , socket("mem", inst)
-        , timer_irq("timer_irq", 1, [](const char* n, size_t i) { return new QemuInitiatorSignalSocket(n); })
+        , timer_irq("timer_irq")
     {
     }
 
     void before_end_of_elaboration() override
     {
         QemuDevice::before_end_of_elaboration();
+
+        // Initialize timer_irq vector with the correct size based on p_num_harts (if not already done)
+        SCP_INFO(SCMOD) << "Timer init: p_num_harts=" << (unsigned int)p_num_harts;
+        if (timer_irq.size() == 0) {
+            timer_irq.init(p_num_harts, [](const char* n, size_t i) { return new QemuInitiatorSignalSocket(n); });
+            SCP_INFO(SCMOD) << "Timer init: timer_irq.size()=" << timer_irq.size();
+        } else {
+            SCP_INFO(SCMOD) << "Timer init: timer_irq already initialized, size=" << timer_irq.size();
+        }
 
         m_dev.set_prop_int("hartid-base", p_hartid_base);
         m_dev.set_prop_int("num-harts", p_num_harts);
@@ -74,8 +83,13 @@ public:
         qemu::SysBusDevice sbd(get_qemu_dev());
         socket.init(qemu::SysBusDevice(m_dev), 0);
 
-        // Initialize timer interrupt output for hart 0 (GPIO output)
-        timer_irq[0].init(m_dev, 0);
+        // Initialize timer interrupt outputs for all harts (GPIO outputs)
+        for (unsigned int i = 0; i < p_num_harts; i++) {
+            timer_irq[i].init(m_dev, i);
+        }
+
+        // Timer IRQ GPIO outputs are now ready for connection
+        SCP_INFO(SCMOD) << "Timer IRQ GPIO outputs ready for connection";
     }
 };
 
