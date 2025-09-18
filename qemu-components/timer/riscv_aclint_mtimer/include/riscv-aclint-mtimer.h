@@ -16,11 +16,13 @@
 #include <module_factory_registery.h>
 
 #include <ports/target.h>
+#include <ports/qemu-initiator-signal-socket.h>
 #include <device.h>
 
 class riscv_aclint_mtimer : public QemuDevice
 {
 public:
+    cci::cci_param<uint32_t> p_hartid_base;
     cci::cci_param<unsigned int> p_num_harts;
     cci::cci_param<uint64_t> p_timecmp_base;
     cci::cci_param<uint64_t> p_time_base;
@@ -29,6 +31,7 @@ public:
     cci::cci_param<bool> p_provide_rdtime;
 
     QemuTargetSocket<> socket;
+    sc_core::sc_vector<QemuInitiatorSignalSocket> timer_irq;
 
     riscv_aclint_mtimer(const sc_core::sc_module_name& name, sc_core::sc_object* o)
         : riscv_aclint_mtimer(name, *(dynamic_cast<QemuInstance*>(o)))
@@ -36,6 +39,7 @@ public:
     }
     riscv_aclint_mtimer(sc_core::sc_module_name nm, QemuInstance& inst)
         : QemuDevice(nm, inst, "riscv.aclint.mtimer")
+        , p_hartid_base("hartid_base", 0, "Base hart ID for this ACLINT MTimer")
         , p_num_harts("num_harts", 0, "Number of HARTS this CLINT is connected to")
         , p_timecmp_base("timecmp_base", 0, "Base address for the TIMECMP registers")
         , p_time_base("time_base", 0, "Base address for the TIME registers")
@@ -45,6 +49,7 @@ public:
                            "If true, provide the CPU with "
                            "a rdtime register")
         , socket("mem", inst)
+        , timer_irq("timer_irq", 1, [](const char* n, size_t i) { return new QemuInitiatorSignalSocket(n); })
     {
     }
 
@@ -52,6 +57,7 @@ public:
     {
         QemuDevice::before_end_of_elaboration();
 
+        m_dev.set_prop_int("hartid-base", p_hartid_base);
         m_dev.set_prop_int("num-harts", p_num_harts);
         m_dev.set_prop_int("timecmp-base", p_timecmp_base);
         m_dev.set_prop_int("time-base", p_time_base);
@@ -67,6 +73,9 @@ public:
 
         qemu::SysBusDevice sbd(get_qemu_dev());
         socket.init(qemu::SysBusDevice(m_dev), 0);
+
+        // Initialize timer interrupt output for hart 0 (GPIO output)
+        timer_irq[0].init(m_dev, 0);
     }
 };
 
