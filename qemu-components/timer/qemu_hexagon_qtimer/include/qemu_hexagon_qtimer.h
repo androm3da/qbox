@@ -20,7 +20,7 @@
 
 class qemu_hexagon_qtimer : public QemuDevice
 {
-protected:
+public:
     cci::cci_param<unsigned int> p_nr_frames;
     cci::cci_param<unsigned int> p_nr_views;
     cci::cci_param<unsigned int> p_cnttid;
@@ -51,13 +51,18 @@ public:
         , p_cnttid("cnttid", 0x11, "Value of cnttid")
         , socket("mem", inst)
         , view_socket("mem_view", inst)
-        , irq("irq", p_nr_frames.get_value(), [](const char* n, size_t i) { return new QemuInitiatorSignalSocket(n); })
+        , irq("irq")
     {
     }
 
     void before_end_of_elaboration() override
     {
         QemuDevice::before_end_of_elaboration();
+
+        // Initialize irq vector with the correct size based on p_nr_frames (if not already done)
+        if (irq.size() == 0) {
+            irq.init(p_nr_frames, [](const char* n, size_t i) { return new QemuInitiatorSignalSocket(n); });
+        }
 
         m_dev.set_prop_int("nr_frames", p_nr_frames);
         m_dev.set_prop_int("nr_views", p_nr_views);

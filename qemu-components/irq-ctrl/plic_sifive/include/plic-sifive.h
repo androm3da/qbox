@@ -59,13 +59,18 @@ public:
                         "separarted by a comma) (example: \"MS,MS\" -> "
                         "two HARTs with M and S mode)")
         , socket("mem", inst)
-        , irq_in("irq_in", p_num_sources, [](const char* n, int i) { return new QemuTargetSignalSocket(n); })
+        , irq_in("irq_in")
     {
     }
 
     void before_end_of_elaboration() override
     {
         QemuDevice::before_end_of_elaboration();
+
+        // Initialize irq_in vector with the correct size based on p_num_sources (if not already done)
+        if (irq_in.size() == 0) {
+            irq_in.init(p_num_sources, [](const char* n, int i) { return new QemuTargetSignalSocket(n); });
+        }
 
         m_dev.set_prop_str("hart-config", p_hart_config.get_value().c_str());
         m_dev.set_prop_int("num-sources", p_num_sources);

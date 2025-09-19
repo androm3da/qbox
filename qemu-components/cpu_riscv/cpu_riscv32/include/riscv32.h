@@ -35,10 +35,8 @@ protected:
 
 
 public:
-    // External interrupt input sockets
-    QemuTargetSignalSocket irq_external_in;  // External interrupt input (for PLIC)
-    QemuTargetSignalSocket irq_software_in;  // Software interrupt input (for ACLINT)
-    QemuTargetSignalSocket irq_timer_in;     // Timer interrupt input (for ACLINT)
+    // IRQ input sockets - sc_vector of 32 IRQs
+    sc_core::sc_vector<QemuTargetSignalSocket> irq_in;
 
 
     // CCI parameters for RISC-V CPU configuration
@@ -64,10 +62,8 @@ public:
          * non-trivial. It means that the SystemC kernel will never starve...
          */
         , m_irq_ev(true)
-        // Initialize interrupt sockets
-        , irq_external_in("irq_external_in")
-        , irq_software_in("irq_software_in")
-        , irq_timer_in("irq_timer_in")
+        // Initialize IRQ vector with 32 sockets
+        , irq_in("irq_in", 32)
         // Initialize CCI parameters with default values
         , p_hartid("hartid", hartid, "Hardware thread ID")
         , p_debug("debug", true, "Enable debug support")
@@ -85,9 +81,9 @@ public:
         , p_resetvec("resetvec", 0x0, "Reset vector address")
     {
         m_external_ev |= m_irq_ev;
-        m_external_ev |= irq_external_in->default_event();
-        m_external_ev |= irq_software_in->default_event();
-        m_external_ev |= irq_timer_in->default_event();
+        for (auto& irq : irq_in) {
+            m_external_ev |= irq->default_event();
+        }
     }
 
     void before_end_of_elaboration()
@@ -125,11 +121,10 @@ public:
     {
         QemuCpu::end_of_elaboration();
 
-        // Initialize interrupt sockets with RISC-V GPIO pin numbers
-        // RISC-V standard interrupt pins: 1=software, 7=timer, 11=external
-        irq_software_in.init(m_dev, 1);
-        irq_timer_in.init(m_dev, 7);
-        irq_external_in.init(m_dev, 11);
+        // Initialize IRQ sockets with GPIO pin numbers 0-31
+        for (int i = 0; i < 32; i++) {
+            irq_in[i].init(m_dev, i);
+        }
 
         // Register reset handler - needed for proper reset behavior when system reset is requested
         qemu::CpuRiscv32 cpu(get_qemu_dev());
