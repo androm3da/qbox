@@ -69,6 +69,9 @@ function(qbox_add_cpu_test target timeout_s)
     #     )
     # endif()
 
+    set(SINGLE_CPU_TGTS "hexagon" "riscv32")
+
+
     install(TARGETS ${target} DESTINATION bin)
 
     target_include_directories(${target} PRIVATE ${PROJECT_SOURCE_DIR}/tests/libqbox/include ${keystone_SOURCE_DIR}/include)
@@ -113,7 +116,14 @@ function(qbox_add_cpu_test target timeout_s)
 
         foreach(num_cpu ${QBOX_CPU_TEST_NUM_CPU_COMBINATION})
             # Skip multi-cpu tests for now
-            if(("${target}" MATCHES "hexagon") AND (NOT (${num_cpu} EQUAL 1)))
+            set(skip_multi TRUE)
+            foreach(tgt_name IN LISTS SINGLE_CPU_TGTS)
+                if("${tgt_name}" MATCHES ".*${target}.*")
+                    set(skip_multi FALSE)
+                    break()
+                endif()
+            endforeach()
+            if((${skip_multi}) AND (NOT (${num_cpu} EQUAL 1)))
                continue()
             endif()
             set(test_name ${target}:sync-pol=${sync_pol}:num-cpu=${num_cpu}:icount=${icount}:threading=${threading}:accel=${accel})
