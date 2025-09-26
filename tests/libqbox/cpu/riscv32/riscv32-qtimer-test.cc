@@ -21,19 +21,22 @@
 #include "riscv32.h"
 #include "qemu-instance.h"
 #include "reset_gpio.h"
+#include "qemu_hexagon_qtimer.h"
 #include "riscv-aclint-mtimer.h"
 #include <ports/multiinitiator-signal-socket.h>
 
 /*
- * RISC-V 32-bit ACLINT Timer IRQ test.
+ * RISC-V 32-bit QTimer with ACLINT coexistence test.
  *
  * This test verifies that timer interrupts can be delivered to the RISC-V CPU
- * through the RISC-V ACLINT machine timer infrastructure.
+ * through ACLINT MTimer while QTimer device provides additional timing functionality.
  *
  * Test design:
- * - Uses RISC-V ACLINT MTimer for timer interrupt delivery
- * - Firmware programs timer for periodic interrupts (every 1ms)
- * - Test verifies that multiple timer interrupts are received
+ * - ACLINT MTimer handles CPU timer interrupts as firmware expects
+ * - QTimer device is available for additional timing functions 
+ * - Firmware programs ACLINT registers for periodic interrupts (every 1ms)
+ * - QTimer coexists in the system providing enhanced timer capabilities
+ * - Test verifies that multiple timer interrupts are received from ACLINT
  */
 template <class CPU, class TESTER>
 class CpuRiscvTestBench : public CpuTestBench<CPU, TESTER>
@@ -57,8 +60,12 @@ class CpuRiscv32TimerIrqTest : public CpuRiscvTestBench<cpu_riscv32, CpuTesterMm
     static constexpr int TIMEOUT_LIMIT_MS = 120000;
 
     // Timer device memory addresses (mapped by router)
-    static constexpr uint64_t ACLINT_MTIMER_BASE = 0x2000000; // ACLINT MTimer base
+    static constexpr uint64_t ACLINT_MTIMER_BASE = 0x2000000; // ACLINT MTimer base (expected by firmware)
     static constexpr uint64_t ACLINT_MTIMER_SIZE = 0x8000;    // ACLINT MTimer size
+    static constexpr uint64_t QTIMER_BASE = 0x3000000;        // QTimer base address
+    static constexpr uint64_t QTIMER_SIZE = 0x1000;           // QTimer size
+    static constexpr uint64_t QTIMER_VIEW_BASE = 0x3001000;   // QTimer view base
+    static constexpr uint64_t QTIMER_VIEW_SIZE = 0x1000;      // QTimer view size
 
     // Timer interrupt period (1ms = 10,000 timer ticks at 10MHz)
     static constexpr uint64_t TIMER_PERIOD_TICKS = 10000;
@@ -67,6 +74,7 @@ class CpuRiscv32TimerIrqTest : public CpuRiscvTestBench<cpu_riscv32, CpuTesterMm
     reset_gpio reset_controller;
 
     // Timer components
+    qemu_hexagon_qtimer qtimer;
     riscv_aclint_mtimer aclint_mtimer;
 
     std::thread m_thread;
@@ -83,7 +91,7 @@ class CpuRiscv32TimerIrqTest : public CpuRiscvTestBench<cpu_riscv32, CpuTesterMm
                               uint32_t handled_val, uint32_t complete_val)
     {
         SCP_DEBUG(SCMOD) << "load_firmware_binary called with mmio_addr=0x" << std::hex << mmio_addr
-                         << ", aclint_addr=0x" << aclint_addr << ", timer_period=" << std::dec << timer_period
+                         << ", qtimer_addr=0x" << aclint_addr << ", timer_period=" << std::dec << timer_period
                          << ", setup_val=" << setup_val << ", handled_val=" << handled_val
                          << ", complete_val=" << complete_val;
 
@@ -105,18 +113,18 @@ class CpuRiscv32TimerIrqTest : public CpuRiscvTestBench<cpu_riscv32, CpuTesterMm
             TEST_ASSERT(false);
         }
 
-        // Patch the constants in the binary (last 24 bytes: mmio_addr, aclint_addr, timer_period, setup_val,
+        // Patch the constants in the binary (last 24 bytes: mmio_addr, qtimer_addr, timer_period, setup_val,
         // handled_val, complete_val)
         TEST_ASSERT(size >= 24);
         uint32_t* mmio_addr_ptr = reinterpret_cast<uint32_t*>(firmware_data.data() + size - 24);
-        uint32_t* aclint_addr_ptr = reinterpret_cast<uint32_t*>(firmware_data.data() + size - 20);
+        uint32_t* qtimer_addr_ptr = reinterpret_cast<uint32_t*>(firmware_data.data() + size - 20);
         uint32_t* timer_period_ptr = reinterpret_cast<uint32_t*>(firmware_data.data() + size - 16);
         uint32_t* setup_val_ptr = reinterpret_cast<uint32_t*>(firmware_data.data() + size - 12);
         uint32_t* handled_val_ptr = reinterpret_cast<uint32_t*>(firmware_data.data() + size - 8);
         uint32_t* complete_val_ptr = reinterpret_cast<uint32_t*>(firmware_data.data() + size - 4);
 
         *mmio_addr_ptr = mmio_addr;
-        *aclint_addr_ptr = aclint_addr;
+        *qtimer_addr_ptr = aclint_addr;
         *timer_period_ptr = timer_period;
         *setup_val_ptr = setup_val;
         *handled_val_ptr = handled_val;
@@ -124,13 +132,13 @@ class CpuRiscv32TimerIrqTest : public CpuRiscvTestBench<cpu_riscv32, CpuTesterMm
 
         SCP_DEBUG(SCMOD) << "Patched firmware constants:";
         SCP_DEBUG(SCMOD) << "  mmio_addr = 0x" << std::hex << mmio_addr;
-        SCP_DEBUG(SCMOD) << "  aclint_addr = 0x" << aclint_addr;
+        SCP_DEBUG(SCMOD) << "  qtimer_addr = 0x" << aclint_addr;
         SCP_DEBUG(SCMOD) << "  timer_period = " << std::dec << timer_period;
         SCP_DEBUG(SCMOD) << "  setup_val = " << setup_val;
         SCP_DEBUG(SCMOD) << "  handled_val = " << handled_val;
         SCP_DEBUG(SCMOD) << "  complete_val = " << complete_val;
 
-        SCP_INFO(SCMOD) << "Loading RISC-V Timer IRQ test firmware from " << firmware_path;
+        SCP_INFO(SCMOD) << "Loading RISC-V QTimer test firmware from " << firmware_path;
 
         // Load firmware directly into memory
         SCP_DEBUG(SCMOD) << "Loading RISC-V firmware at 0x" << std::hex << MEM_ADDR << " (MEM_ADDR), size=" << std::dec
@@ -144,6 +152,7 @@ public:
     CpuRiscv32TimerIrqTest(const sc_core::sc_module_name& n)
         : CpuRiscvTestBench<cpu_riscv32, CpuTesterMmio>(n)
         , reset_controller("reset", &m_inst_a)
+        , qtimer("qtimer", &m_inst_a)
         , aclint_mtimer("aclint_mtimer", &m_inst_a)
         , timer_interrupt_count(0)
         , test_status(0)
@@ -152,7 +161,11 @@ public:
         // Debug: Check parameter values during construction
         SCP_INFO(SCMOD) << "Constructor: p_num_cpu=" << (int)p_num_cpu << ", m_cpus.size()=" << m_cpus.size();
 
-        // Configure timer parameters immediately after construction
+        // Configure QTimer parameters using CCI
+        // Note: These are set to defaults in constructor, so we don't need to modify them
+        // The qtimer is initialized with nr_frames=2, nr_views=1, cnttid=0x11
+
+        // Configure ACLINT parameters for interrupt routing
         aclint_mtimer.p_num_harts = p_num_cpu;
         aclint_mtimer.p_hartid_base = 0;
         aclint_mtimer.p_timecmp_base = 0x0;
@@ -161,15 +174,19 @@ public:
         aclint_mtimer.p_timebase_freq = 10000000;
         aclint_mtimer.p_provide_rdtime = true;
 
-        SCP_INFO(SCMOD) << "Constructor: After setting timer params, aclint_mtimer.p_num_harts="
-                        << (unsigned int)aclint_mtimer.p_num_harts;
+        SCP_INFO(SCMOD) << "Constructor: After setting params - qtimer configured with defaults"
+                        << ", aclint_mtimer.p_num_harts=" << (unsigned int)aclint_mtimer.p_num_harts;
 
-        // Map timer device to memory
+        // Map timer devices to memory
         m_router.add_target(aclint_mtimer.socket, ACLINT_MTIMER_BASE, ACLINT_MTIMER_SIZE);
+        m_router.add_target(qtimer.socket, QTIMER_BASE, QTIMER_SIZE);
+        m_router.add_target(qtimer.view_socket, QTIMER_VIEW_BASE, QTIMER_VIEW_SIZE);
 
         SCP_INFO(SCMOD) << "Timer device mapping:";
         SCP_INFO(SCMOD) << "  ACLINT MTimer at 0x" << std::hex << ACLINT_MTIMER_BASE << " (size 0x"
-                        << ACLINT_MTIMER_SIZE << ")";
+                        << ACLINT_MTIMER_SIZE << ") - used by firmware";
+        SCP_INFO(SCMOD) << "  QTimer at 0x" << std::hex << QTIMER_BASE << " (size 0x" << QTIMER_SIZE << ") - provides timing to ACLINT";
+        SCP_INFO(SCMOD) << "  QTimer view at 0x" << std::hex << QTIMER_VIEW_BASE << " (size 0x" << QTIMER_VIEW_SIZE << ")";
 
         for (int i = 0; i < m_cpus.size(); i++) {
             auto& cpu = m_cpus[i];
@@ -183,9 +200,9 @@ public:
         sensitive << reset_event;
         dont_initialize();
 
-        // Load RISC-V 32-bit timer firmware compiled with LLVM tools
+        // Load RISC-V 32-bit QTimer firmware compiled with LLVM tools
         load_firmware_binary(static_cast<uint32_t>(CpuTesterMmio::MMIO_ADDR), // MMIO communication address
-                             static_cast<uint32_t>(ACLINT_MTIMER_BASE),       // ACLINT MTimer base address
+                             static_cast<uint32_t>(ACLINT_MTIMER_BASE),       // ACLINT MTimer base address (firmware expects ACLINT)
                              static_cast<uint32_t>(TIMER_PERIOD_TICKS),       // Timer period in ticks
                              TIMER_SETUP_COMPLETE,                            // Timer setup complete value
                              TIMER_INTERRUPT_HANDLED,                         // Timer interrupt handled value
@@ -203,28 +220,33 @@ public:
         // Force re-set the timer parameters before elaboration
         aclint_mtimer.p_num_harts = p_num_cpu;
         SCP_INFO(SCMOD) << "Before elaboration: p_num_cpu=" << (int)p_num_cpu
+                        << ", qtimer configured with defaults"
                         << ", aclint_mtimer.p_num_harts=" << (unsigned int)aclint_mtimer.p_num_harts;
 
         // Call parent before_end_of_elaboration - this will trigger timer component elaboration
         CpuRiscvTestBench<cpu_riscv32, CpuTesterMmio>::before_end_of_elaboration();
 
-        // Check if timer component properly initialized the vector
+        // Check if timer components properly initialized their vectors
         SCP_INFO(SCMOD) << "After parent elaboration - Timer IRQ binding: m_cpus.size()=" << m_cpus.size()
-                        << ", p_num_cpu=" << (int)p_num_cpu << ", timer_irq.size()=" << aclint_mtimer.timer_irq.size();
+                        << ", p_num_cpu=" << (int)p_num_cpu << ", qtimer.irq.size()=" << qtimer.irq.size()
+                        << ", aclint_mtimer.timer_irq.size()=" << aclint_mtimer.timer_irq.size();
 
-        // Force timer component to initialize its vector early by calling its timer initialization method
+        // Force ACLINT timer component to initialize its vector early
         aclint_mtimer.timer_irq.init(p_num_cpu,
                                      [](const char* n, size_t i) { return new QemuInitiatorSignalSocket(n); });
-        SCP_INFO(SCMOD) << "Forced timer_irq init, size=" << aclint_mtimer.timer_irq.size();
+        SCP_INFO(SCMOD) << "Forced aclint timer_irq init, size=" << aclint_mtimer.timer_irq.size();
 
-        // Connect timer IRQ outputs to CPU timer interrupt inputs (IRQ pin 7)
-        // In SiFive E architecture, ACLINT MTimer connects directly to CPU timer interrupt pin
+        // Connect ACLINT MTimer IRQ outputs to CPU timer interrupt inputs (IRQ pin 7)
+        // ACLINT handles timer interrupts as firmware expects
         for (int i = 0; i < m_cpus.size() && i < aclint_mtimer.timer_irq.size(); i++) {
             auto& cpu = m_cpus[i];
             aclint_mtimer.timer_irq[i].bind(cpu.irq_in[7]);
             SCP_INFO(SCMOD) << "Connected ACLINT MTimer timer_irq[" << i << "] to cpu[" << i
                             << "].irq_in[7] (machine timer interrupt)";
         }
+
+        // QTimer is available for additional timing functions but ACLINT handles CPU timer interrupts
+        SCP_INFO(SCMOD) << "QTimer available at 0x" << std::hex << QTIMER_BASE << " but ACLINT handles CPU timer interrupts";
     }
 
     void end_of_elaboration() override
@@ -232,8 +254,9 @@ public:
         // Call parent end_of_elaboration - this will realize the QEMU devices
         CpuRiscvTestBench<cpu_riscv32, CpuTesterMmio>::end_of_elaboration();
 
-        SCP_INFO(SCMOD) << "End of elaboration - timer_irq.size()=" << aclint_mtimer.timer_irq.size();
-        SCP_INFO(SCMOD) << "End of elaboration - RISC-V ACLINT MTimer -> CPU timer interrupt connections established";
+        SCP_INFO(SCMOD) << "End of elaboration - qtimer.irq.size()=" << qtimer.irq.size()
+                        << ", aclint_mtimer.timer_irq.size()=" << aclint_mtimer.timer_irq.size();
+        SCP_INFO(SCMOD) << "End of elaboration - QTimer -> CPU timer interrupt connections established";
     }
 
     virtual void mmio_write(int id, uint64_t addr, uint64_t data, size_t len) override

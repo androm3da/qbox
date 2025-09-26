@@ -170,7 +170,8 @@ if(LLVM_MC AND LLD AND LLVM_OBJCOPY AND APPLE)
     target_compile_definitions(riscv32-qtimer-test PRIVATE
         FIRMWARE_BIN_PATH="${CMAKE_CURRENT_BINARY_DIR}/riscv32-qtimer-test.bin")
     target_include_directories(riscv32-qtimer-test PRIVATE
-        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/qemu-components/timer/riscv_aclint_mtimer/include>)
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/qemu-components/timer/riscv_aclint_mtimer/include>
+        $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/qemu-components/timer/qemu_hexagon_qtimer/include>)
 else()
     message(WARNING "LLVM tools not found - skipping riscv32-reset-test, riscv32-dmi-test, riscv32-irq-test, and riscv32-qtimer-test")
 endif()
