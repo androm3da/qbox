@@ -2024,13 +2024,29 @@ private:
 
     void smmu_tlbflush_all_f(tlm::tlm_generic_payload& txn, sc_core::sc_time& delay)
     {
+        // TLBIALL is a context bank specific register - determine which CB this write is for
+        sc_dt::uint64 addr = txn.get_address();
+
+        // Use the same address calculation logic as smmu_cb_offset()
+        // CB register space starts at (p_num_pages + cb) * PAGESIZE
+        // TLBIALL is at offset 0x618 within that space
+
+        uint64_t cb_base_addr = addr - A_SMMU_CB0_TLBIALL;
+
+        // Find which CB this corresponds to using the smmu_cb_offset formula
+        // smmu_cb_offset(cb) = ((p_num_pages + cb) * PAGESIZE) / 4
+        // So: cb = (cb_base_reg_index * 4 / PAGESIZE) - p_num_pages
+        unsigned int cb = (cb_base_addr) / PAGESIZE - p_num_pages;
+
+        SCP_DEBUG(()) << "TLBIALL write for CB" << cb << " at address 0x" << std::hex << addr << " (cb_base_addr=0x"
+                      << cb_base_addr << ", cb_base_addr=" << std::dec << cb_base_addr << ")";
+
+        // Only invalidate TLB entries for this specific context bank
         for (auto tbu : tbus) {
             tbu->start_invalidates();
         }
-        for (int i = 0; i < MAX_CB; i++) {
-            for (auto tbu : tbus) {
-                tbu->invalidate(i);
-            }
+        for (auto tbu : tbus) {
+            tbu->invalidate(cb);
         }
         for (auto tbu : tbus) {
             tbu->stop_invalidates();
@@ -3438,6 +3454,7 @@ protected:
     virtual bool get_direct_mem_ptr(tlm::tlm_generic_payload& txn, tlm::tlm_dmi& dmi_data)
     {
         if (!m_dmi_invalidate_lock.try_lock()) {
+            SCP_DEBUG(())("Failed to get lock, DMI will be refused");
             return false;
         }
 
@@ -3564,7 +3581,11 @@ public:
 
     void invalidate(uint32_t CB)
     {
+        // The dmi_range holds the maximal range for this CB.
+        // We might - inadvertantly - invalidate more than we need, but that shouldn't be an issue
+
         if (dmi_range_valid[CB]) {
+            SCP_INFO(())("TLBIALL invalidate {:x} - {:x}", dmi_range[CB].first, dmi_range[CB].second);
             upstream_socket->invalidate_direct_mem_ptr(dmi_range[CB].first, dmi_range[CB].second);
         }
         dmi_range_valid[CB] = false;
