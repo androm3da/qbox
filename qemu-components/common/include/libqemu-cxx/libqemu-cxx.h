@@ -439,8 +439,8 @@ public:
 
     qemu::MemoryRegion m_root_te;
     std::shared_ptr<qemu::AddressSpace> m_as_te;
-    qemu::MemoryRegion m_root;
-    std::shared_ptr<qemu::AddressSpace> m_as;
+    qemu::MemoryRegion m_root_io;
+    std::shared_ptr<qemu::AddressSpace> m_as_io;
     std::map<uint64_t, std::shared_ptr<DmiRegionBase>> m_dmi_aliases_te;
     std::map<uint64_t, std::shared_ptr<DmiRegionBase>> m_dmi_aliases_io;
     uint64_t min_page_sz;
@@ -449,8 +449,8 @@ public:
         : MemoryRegion(o)
         , m_root_te(get_inst().object_new_unparented<qemu::MemoryRegion>())
         , m_as_te(get_inst().address_space_new())
-        , m_root(get_inst().object_new_unparented<qemu::MemoryRegion>())
-        , m_as(get_inst().address_space_new())
+        , m_root_io(get_inst().object_new_unparented<qemu::MemoryRegion>())
+        , m_as_io(get_inst().address_space_new())
     {
     }
 

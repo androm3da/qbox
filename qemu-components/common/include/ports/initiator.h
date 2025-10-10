@@ -228,12 +228,12 @@ protected:
                     DmiRegionAlias::Ptr alias = m_inst.get_dmi_manager().get_new_region_alias(ldmi_data);
                     SCP_DEBUG(()) << "Adding DMI Region alias " << *alias;
                     qemu::MemoryRegion alias_mr = alias->get_alias_mr();
-                    iommumr->m_root.add_subregion(alias_mr, alias->get_start());
+                    iommumr->m_root_io.add_subregion(alias_mr, alias->get_start());
                     alias->set_installed();
                     iommumr->m_dmi_aliases_io[alias->get_start()] = alias;
                 }
 
-                te->target_as = iommumr->m_as->get_ptr();
+                te->target_as = iommumr->m_as_io->get_ptr();
                 te->addr_mask = start_msk;
                 te->iova = addr & ~start_msk;
                 te->translated_addr = (addr & ~start_msk) + base_addr;
@@ -262,7 +262,7 @@ protected:
             // No DMI at all, either an MMIO, or a DMI failure, setup for a 1-1 translation for the minimal page
             // in the normal address space
 
-            te->target_as = iommumr->m_as->get_ptr();
+            te->target_as = iommumr->m_as_io->get_ptr();
             te->addr_mask = (1 << iommumr->min_page_sz) - 1;
             te->iova = addr & ~te->addr_mask;
             te->translated_addr = (addr & ~te->addr_mask) + base_addr;
@@ -364,8 +364,7 @@ protected:
             tlm::tlm_dmi first_map = u_dmi.get_first(gs::tlm_dmi_ex::dmi_mapped);
 
             uint64_t start = first_map.get_start_address();
-            uint64_t size = first_map.get_end_address() - first_map.get_start_address();
-
+            uint64_t size = (first_map.get_end_address() - first_map.get_start_address()) + 1;
             auto itr = m_mmio_mrs.find(start);
             if (itr == m_mmio_mrs.end()) {
                 // Better check for overlapping iommu's - they must be banned     !!
@@ -373,10 +372,10 @@ protected:
                 qemu::RcuReadLock rcu_read_lock = m_inst.get().rcu_read_lock_new();
 
                 /* invalidate any 'old' regions we happen to have mapped previously */
-                invalidate_single_range(start, start + size);
+                invalidate_single_range(start, start + size - 1);
 
                 SCP_INFO(())
-                ("Adding IOMMU for VA 0x{:x} [0x{:x} - 0x{:x}]", trans.get_address(), start, start + size);
+                ("Adding IOMMU for VA 0x{:x} [0x{:x} - 0x{:x}]", trans.get_address(), start, start + size - 1);
 
                 using namespace std::placeholders;
                 qemu::MemoryRegionOpsPtr ops;
@@ -804,34 +803,33 @@ public:
         if (m_finished) return;
         SCP_DEBUG(()) << "DMI invalidate [0x" << std::hex << start_range << ", 0x" << std::hex << end_range << "]";
 
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard<std::mutex> lock(m_mutex);
 
-            for (auto m : m_mmio_mrs) {
-                auto mr_start = m.first;
-                auto mr_end = m.first + m.second->get_size();
-                if ((mr_start >= start_range && mr_start <= end_range) ||
-                    (mr_end >= start_range && mr_end <= end_range) || (mr_start < start_range && mr_end > end_range)) {
-                    for (auto it = m.second->m_mapped_te.begin(); it != m.second->m_mapped_te.end();) {
-                        if ((it->first << m.second->min_page_sz) + mr_start >= start_range &&
-                            (it->first << m.second->min_page_sz) + mr_start < end_range) {
-                            m.second->iommu_unmap(&(it->second));
-                            it = m.second->m_mapped_te.erase(it);
-                        } else
-                            it++;
+        for (auto m : m_mmio_mrs) {
+            auto mr_start = m.first;
+            auto mr_end = m.first + m.second->get_size();
+            if ((mr_start >= start_range && mr_start <= end_range) || (mr_end >= start_range && mr_end <= end_range) ||
+                (mr_start < start_range && mr_end > end_range)) {
+                for (auto it = m.second->m_mapped_te.begin(); it != m.second->m_mapped_te.end();) {
+#ifdef USE_UNORD
+                    if ((it->first << m.second->min_page_sz) + mr_start >= start_range &&
+                        (it->first << m.second->min_page_sz) + mr_start < end_range)
+#else
+                    if (it->first + mr_start >= start_range && it->first + mr_start < end_range)
+#endif
+                    {
+                        m.second->iommu_unmap(&(it->second));
+                        it = m.second->m_mapped_te.erase(it);
+                    } else {
+                        it++;
                     }
-                    return; // If we found this, then we're done. Overlapping IOMMU's are not allowed.
                 }
+                return; // If we found this, then we're done. Overlapping IOMMU's are not allowed.
             }
         }
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            m_ranges.push_back(std::make_pair(start_range, end_range));
-        }
 
+        m_ranges.push_back(std::make_pair(start_range, end_range));
         m_initiator.initiator_async_run([&]() { invalidate_ranges_safe_cb(); });
-
-        /* For 7.2 this may need to be safe aync work ???????? */
     }
 
     virtual void reset()
