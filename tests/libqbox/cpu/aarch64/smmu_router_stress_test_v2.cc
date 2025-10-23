@@ -278,6 +278,17 @@ private:
         *reinterpret_cast<uint64_t*>(trans.get_data_ptr()) = data;
     }
 
+    /**
+     * @brief Handles a request from a CPU to fill or check a region.
+     * @param cpu_id The ID of the requesting CPU.
+     * @param request The type of request (FILL or CHECK).
+     *
+     * @note This function is a critical section for region allocation.
+     * Access to the `m_available_regions` and `m_regions_to_check` queues
+     * is serialized by the single-threaded nature of the tester's b_transport,
+     * preventing race conditions where multiple CPUs might be assigned the
+     * same region.
+     */
     void handle_request(uint32_t cpu_id, RequestType request)
     {
         CPUState& cpu = m_cpu_states[cpu_id];
@@ -377,6 +388,16 @@ private:
         }
     }
 
+    /**
+     * @brief Configures SMMU mapping for a CPU to a specific region.
+     * @param cpu_id The ID of the CPU.
+     * @param region_id The ID of the region to map.
+     *
+     * @note This method is a critical section. The tester controller's
+     * single-threaded event processing model ensures that only one mapping
+     * operation occurs at a time, preventing race conditions where multiple
+     * CPUs could try to modify SMMU settings simultaneously.
+     */
     void configure_smmu_mapping(uint32_t cpu_id, uint32_t region_id);
     void unmap_cpu_region(uint32_t cpu_id);
 
@@ -385,6 +406,45 @@ private:
     void clear_region_pattern(uint32_t region_id);
 };
 
+/**
+ * @class CpuArmCortexA53SMMUStressTestV2
+ * @brief A SystemC test bench for stressing the SMMUv2 with multiple CPUs.
+ *
+ * This test implements a sophisticated, tester-controlled architecture to
+ * stress the SMMU-500. Unlike traditional approaches where CPUs manage their
+ * own synchronization and SMMU configuration, this test centralizes all
+
+ * control within the `SMMUTesterController`.
+ *
+ * Key Architectural Concepts:
+ *
+ * 1.  **Tester-Controlled Synchronization**: CPUs do not communicate directly.
+ *     Instead, they make requests to the tester via MMIO registers and poll
+ *     for completion. This serializes all SMMU operations and prevents the
+ *     race conditions inherent in multi-CPU configurations.
+ *
+ * 2.  **Dual-TBU Architecture**: Each CPU is associated with two Translation
+ *     Buffer Units (TBUs) to separate identity-mapped and high-VA-mapped
+ *     traffic:
+ *     -   **Identity TBU (shared, CB0)**: All low-address traffic (e.g.,
+ *         firmware, tester MMIO) is routed through a shared TBU mapped to
+ *         Context Bank 0 (CB0). CB0 has its MMU disabled, providing a direct
+ *         1:1 VA-to-PA mapping.
+ *     -   **High VA TBU (per-CPU, CB1+)**: High-address traffic (accesses to
+ *         the virtual test region) is routed through a dedicated TBU per CPU,
+ *         each mapped to a unique Context Bank (CB1 for CPU0, CB2 for CPU1,
+ *         etc.). These CBs have their MMU enabled and manage the translation
+ *         from the high virtual address to the physical memory region.
+ *
+ * 3.  **Dynamic Region Mapping**: The tester dynamically maps virtual memory
+ *     regions to physical memory for each CPU on demand. It configures the
+ *     SMMU, invalidates TLBs, and signals readiness to the CPU, ensuring
+ *     that memory accesses are correctly translated.
+ *
+ * This design ensures a robust, race-free, and scalable stress test for the
+ * SMMU, capable of handling multiple CPUs concurrently without data corruption
+ * or synchronization failures.
+ */
 class CpuArmCortexA53SMMUStressTestV2 : public TestBench, public CpuTesterCallbackIface
 {
 public:
@@ -414,6 +474,15 @@ public:
     static constexpr uint64_t PAGE_SIZE = 0x1000;       // 4KB pages
 
 protected:
+    struct PageTableAddresses {
+        uint64_t l0, l1, l2, l3;
+    };
+
+    PageTableAddresses get_page_table_addresses_for_cpu(uint32_t cpu) const
+    {
+        uint64_t base = PAGE_TABLE_BASE + ((cpu + 1) * PAGE_SIZE * 4);
+        return { base, base + PAGE_SIZE, base + (PAGE_SIZE * 2), base + (PAGE_SIZE * 3) };
+    }
     // CCI parameters
     cci::cci_param<int> p_num_cpu;
     cci::cci_param<int> p_quantum_ns;
@@ -451,6 +520,53 @@ protected:
 public:
     // Memory accessor for proper routing - made public for tester access
     MemoryAccessor m_memory_accessor;
+
+private:
+    // ========================================================================
+    // SMMU Register Offset Constants
+    // ========================================================================
+
+    // SMMU Global Register Offsets (from SMMU_REG_ADDR)
+    static constexpr uint32_t SMMU_SCR0_OFFSET = 0x0;
+    static constexpr uint32_t SMMU_SMR_BASE_OFFSET = 0x800;
+    static constexpr uint32_t SMMU_S2CR_BASE_OFFSET = 0xc00;
+    static constexpr uint32_t SMMU_CBAR_BASE_OFFSET = 0x1000;
+
+    // Context Bank Page Layout
+    static constexpr uint32_t CB_PAGE_OFFSET = 16; // CBs start at page 16 (0x10000)
+    static constexpr uint32_t CB_PAGE_SIZE = 4096; // 4KB per CB (0x1000)
+
+    // Context Bank Register Offsets (from CB base address)
+    static constexpr uint32_t CB_SCTLR_OFFSET = 0x0;
+    static constexpr uint32_t CB_TTBR0_LOW_OFFSET = 0x20;
+    static constexpr uint32_t CB_TTBR0_HIGH_OFFSET = 0x24;
+    static constexpr uint32_t CB_TCR_OFFSET = 0x30;
+    static constexpr uint32_t CB_MAIR0_OFFSET = 0x38;
+    static constexpr uint32_t CB_MAIR1_OFFSET = 0x3C;
+    static constexpr uint32_t CB_TLBIALL_OFFSET = 0x618;
+
+    /**
+     * @brief Calculate the base address of a context bank's register space
+     * @param cb Context bank number (0-based)
+     * @return Physical address of the context bank's register space
+     *
+     * Context banks are located at SMMU_REG_ADDR + 0x10000 + (cb * 0x1000).
+     * This is page 16 onwards from SMMU base, with each CB occupying one 4KB page.
+     *
+     * Memory layout:
+     *   SMMU_REG_ADDR + 0x00000: Global registers
+     *   SMMU_REG_ADDR + 0x10000: CB0 registers (page 16)
+     *   SMMU_REG_ADDR + 0x11000: CB1 registers (page 17)
+     *   ...
+     */
+    uint32_t get_context_bank_base(uint32_t cb) const
+    {
+        assert(cb < m_smmu.p_num_cb && "Context bank ID out of range");
+        uint32_t cb_offset_words = ((CB_PAGE_OFFSET + cb) * CB_PAGE_SIZE) / 4;
+        return SMMU_REG_ADDR + (cb_offset_words * 4);
+    }
+
+    void reconfigure_context_bank(uint32_t cb, uint64_t page_table_addr);
 
 protected:
     void set_firmware(const char* assembly, uint64_t addr = 0)
@@ -651,7 +767,6 @@ public:
         generate_tester_controlled_firmware();
 
         SC_THREAD(configure_test);
-        //        SC_THREAD(timeout_monitor);
     }
 
     virtual ~CpuArmCortexA53SMMUStressTestV2()
@@ -680,18 +795,18 @@ public:
         SCP_INFO(SCMOD) << "Configuring SMMU for tester-controlled operation";
 
         // First: clear CLIENTPD in SMMU_SCR0 (enable SMMU translation)
-        write_smmu_register(SMMU_REG_ADDR + 0x0, 0x0);
+        write_smmu_register(SMMU_REG_ADDR + SMMU_SCR0_OFFSET, 0x0);
 
         // Configure SMRs and S2CRs for NEW DUAL-TBU ARCHITECTURE
         // SHARED IDENTITY: All identity TBUs share StreamID 0 → CB0
         // PER-CPU HIGH VA: Each CPU gets unique StreamID for high VA → separate CBs
 
         // SMR[0]: StreamID 0 -> CB0 (SHARED identity mapping for ALL CPUs)
-        uint32_t smr0_addr = SMMU_REG_ADDR + 0x800;
+        uint32_t smr0_addr = SMMU_REG_ADDR + SMMU_SMR_BASE_OFFSET;
         uint32_t smr0_value = (1 << 31) | (0 << 16) | (0 << 0); // VALID=1, MASK=0, ID=0
         write_smmu_register(smr0_addr, smr0_value);
 
-        uint32_t s2cr0_addr = SMMU_REG_ADDR + 0xc00;
+        uint32_t s2cr0_addr = SMMU_REG_ADDR + SMMU_S2CR_BASE_OFFSET;
         uint32_t s2cr0_value = (0x1 << 16) | (0 << 0); // TYPE=1, CBNDX=0
         write_smmu_register(s2cr0_addr, s2cr0_value);
 
@@ -702,11 +817,11 @@ public:
             uint32_t high_va_stream_id = cpu + 1; // StreamID 1,2,3... for high VA
             uint32_t high_va_cb = cpu + 1;        // CB1,CB2,CB3... for high VA
 
-            uint32_t smr_addr = SMMU_REG_ADDR + 0x800 + (high_va_stream_id * 4);
+            uint32_t smr_addr = SMMU_REG_ADDR + SMMU_SMR_BASE_OFFSET + (high_va_stream_id * 4);
             uint32_t smr_value = (1 << 31) | (0 << 16) | (high_va_stream_id << 0); // VALID=1, MASK=0, ID=stream_id
             write_smmu_register(smr_addr, smr_value);
 
-            uint32_t s2cr_addr = SMMU_REG_ADDR + 0xc00 + (high_va_stream_id * 4);
+            uint32_t s2cr_addr = SMMU_REG_ADDR + SMMU_S2CR_BASE_OFFSET + (high_va_stream_id * 4);
             uint32_t s2cr_value = (0x1 << 16) | (high_va_cb << 0); // TYPE=1, CBNDX=cb
             write_smmu_register(s2cr_addr, s2cr_value);
 
@@ -746,36 +861,59 @@ public:
 
     void setup_identity_context_bank(uint32_t cpu)
     {
-        // Set up identity context bank (CB0, CB1) with NO page tables - pure identity mapping
-        uint32_t cb = cpu; // Identity CBs are CB0, CB1
-        uint32_t cb_offset_words = ((16 + cb) * 4096) / 4;
-        uint32_t cb_base = SMMU_REG_ADDR + (cb_offset_words * 4);
+        // Set up identity context bank (CB0) with NO page tables for pure identity mapping
+        uint32_t cb = cpu; // Identity CB is always CB0
+        uint32_t cb_base = get_context_bank_base(cb);
 
-        // Set CBAR.TYPE = 1 (translation enabled)
-        uint32_t cbar_addr = SMMU_REG_ADDR + 0x1000 + (cb * 4);
+        // Set CBAR.TYPE = 1 (translation enabled for this CB)
+        uint32_t cbar_addr = SMMU_REG_ADDR + SMMU_CBAR_BASE_OFFSET + (cb * 4);
         write_smmu_register(cbar_addr, (1 << 16)); // TYPE=1
 
-        // CRITICAL: For identity mapping, DISABLE MMU completely
-        // This makes VA = PA directly without any page table walking
-        write_smmu_register(cb_base + 0x0, 0x0); // SCTLR: MMU disabled (M=0)
+        // CRITICAL: For identity mapping, DISABLE MMU completely in the CB
+        // This makes VA = PA directly without any page table walking. M bit (bit 0) is 0.
+        write_smmu_register(cb_base + CB_SCTLR_OFFSET, 0x0);
 
-        // Clear TTBR registers (not used when MMU disabled)
-        write_smmu_register(cb_base + 0x20, 0x0);
-        write_smmu_register(cb_base + 0x24, 0x0);
+        // Clear TTBR registers as they are not used when the MMU is disabled
+        write_smmu_register(cb_base + CB_TTBR0_LOW_OFFSET, 0x0);
+        write_smmu_register(cb_base + CB_TTBR0_HIGH_OFFSET, 0x0);
 
-        // Set TCR to safe defaults (not used when MMU disabled)
-        write_smmu_register(cb_base + 0x30, (1U << 31) | (25 << 0)); // EAE=1, T0SZ=25
+        // Set TCR to safe defaults, although not used when MMU is disabled
+        write_smmu_register(cb_base + CB_TCR_OFFSET, (1U << 31) | (25 << 0)); // EAE=1, T0SZ=25
 
-        // Configure MAIR (not used when MMU disabled)
-        write_smmu_register(cb_base + 0x38, 0xFF);
-        write_smmu_register(cb_base + 0x3C, 0x0);
+        // Configure MAIR for normal memory, although not used when MMU is disabled
+        write_smmu_register(cb_base + CB_MAIR0_OFFSET, 0xFF);
+        write_smmu_register(cb_base + CB_MAIR1_OFFSET, 0x0);
 
         SCP_INFO(SCMOD) << "Identity context bank CB" << cb << " set up for CPU " << cpu
                         << " with MMU DISABLED (pure identity mapping VA=PA)";
     }
 
+    /**
+     * @brief Sets up a complete, multi-level page table for a high VA context bank.
+     * @param cpu The CPU ID to associate with this context bank.
+     * @param cb The context bank number to configure (must be > 0).
+     *
+     * This function is critical for the dual-TBU architecture. It creates a
+     * full L0->L1->L2->L3 page table structure for a CPU's high VA context bank.
+     *
+     * Key details:
+     * - **TBU Address Stripping**: The TBU strips the upper bits of the high
+     *   virtual address (0x300000000ULL), presenting it to the SMMU as if it
+     *   were 0x0.
+     * - **Dual L1 Mapping**: To handle this, we create two L1 entries: one for the
+     *   original high VA and one for the stripped VA (0x0). Both point to the
+     *   same L2 table, ensuring correct translation regardless of the initial
+     *   address.
+     * - **Default Mapping**: A default L3 mapping is created to prevent "bad
+     *   descriptor" faults upon initial MMU enable.
+     */
     void setup_complete_high_va_context_bank(uint32_t cpu, uint32_t cb)
     {
+        // Validate parameters
+        assert(cpu < p_num_cpu.get_value() && "CPU ID out of range");
+        assert(cb > 0 && "High VA context bank must be > 0");
+        assert(cb == cpu + 1 && "High VA CB must map to CPU+1");
+
         // CRITICAL FIX: Consolidated function to replace conflicting setup functions
         // This combines setup_high_va_context_bank() and setup_complete_page_table_structure()
         // to eliminate the conflicts that cause "bad descriptor" SMMU faults
@@ -784,15 +922,14 @@ public:
                         << cb << ") - resolving function conflicts";
 
         // Use consistent page table addressing throughout
-        uint64_t page_table_offset = (cpu + 1) * PAGE_SIZE * 4; // CB1=+4 pages, CB2=+8 pages, CB3=+12 pages
-        uint64_t page_table_addr = PAGE_TABLE_BASE + page_table_offset;
+        const auto pt_addrs = get_page_table_addresses_for_cpu(cpu);
 
-        uint64_t l0_table_addr = page_table_addr;
-        uint64_t l1_table_addr = page_table_addr + PAGE_SIZE;
-        uint64_t l2_table_addr = page_table_addr + (PAGE_SIZE * 2);
-        uint64_t l3_table_addr = page_table_addr + (PAGE_SIZE * 3);
+        uint64_t l0_table_addr = pt_addrs.l0;
+        uint64_t l1_table_addr = pt_addrs.l1;
+        uint64_t l2_table_addr = pt_addrs.l2;
+        uint64_t l3_table_addr = pt_addrs.l3;
 
-        SCP_INFO(SCMOD) << "  - Page table base: 0x" << std::hex << page_table_addr;
+        SCP_INFO(SCMOD) << "  - Page table base: 0x" << std::hex << l0_table_addr;
         SCP_INFO(SCMOD) << "  - L0 table: 0x" << std::hex << l0_table_addr;
         SCP_INFO(SCMOD) << "  - L1 table: 0x" << std::hex << l1_table_addr;
         SCP_INFO(SCMOD) << "  - L2 table: 0x" << std::hex << l2_table_addr;
@@ -851,30 +988,30 @@ public:
         }
 
         // Configure context bank registers
-        uint32_t cb_offset_words = ((16 + cb) * 4096) / 4;
-        uint32_t cb_base = SMMU_REG_ADDR + (cb_offset_words * 4);
+        uint32_t cb_base = get_context_bank_base(cb);
 
-        // Set CBAR.TYPE = 1 (translation enabled)
-        uint32_t cbar_addr = SMMU_REG_ADDR + 0x1000 + (cb * 4);
+        // Set CBAR.TYPE = 1 (translation enabled for this CB)
+        uint32_t cbar_addr = SMMU_REG_ADDR + SMMU_CBAR_BASE_OFFSET + (cb * 4);
         write_smmu_register(cbar_addr, (1 << 16)); // TYPE=1
 
-        // Configure TTBR0 with consistent page table address
-        write_smmu_register(cb_base + 0x20, static_cast<uint32_t>(page_table_addr & 0xFFFFFFFF));
-        write_smmu_register(cb_base + 0x24, static_cast<uint32_t>((page_table_addr >> 32) & 0xFFFFFFFF));
+        // Configure TTBR0 with the page table address
+        write_smmu_register(cb_base + CB_TTBR0_LOW_OFFSET, static_cast<uint32_t>(l0_table_addr & 0xFFFFFFFF));
+        write_smmu_register(cb_base + CB_TTBR0_HIGH_OFFSET, static_cast<uint32_t>((l0_table_addr >> 32) & 0xFFFFFFFF));
 
-        SCP_INFO(SCMOD) << "  - TTBR0 SET: CB" << cb << " TTBR0=0x" << std::hex << page_table_addr;
-        SCP_INFO(SCMOD) << "  - Expected L3 table at: 0x" << std::hex << (page_table_addr + (PAGE_SIZE * 3));
+        SCP_INFO(SCMOD) << "  - TTBR0 SET: CB" << cb << " TTBR0=0x" << std::hex << l0_table_addr;
+        SCP_INFO(SCMOD) << "  - Expected L3 table at: 0x" << std::hex << (l0_table_addr + (PAGE_SIZE * 3));
 
         // Configure TCR for 4KB pages, 48-bit VA space
-        write_smmu_register(cb_base + 0x30, (1U << 31) | (16 << 0) | (0 << 14) | (3 << 12) | (1 << 10) | (1 << 8));
+        write_smmu_register(cb_base + CB_TCR_OFFSET,
+                            (1U << 31) | (16 << 0) | (0 << 14) | (3 << 12) | (1 << 10) | (1 << 8));
 
         // Configure MAIR for normal memory
-        write_smmu_register(cb_base + 0x38, 0xFF);
-        write_smmu_register(cb_base + 0x3C, 0x0);
+        write_smmu_register(cb_base + CB_MAIR0_OFFSET, 0xFF);
+        write_smmu_register(cb_base + CB_MAIR1_OFFSET, 0x0);
 
-        // Enable MMU with complete page table structure - SINGLE ENABLE OPERATION
-        uint32_t sctlr_value = (1 << 0) | (1 << 2) | (1 << 4);
-        write_smmu_register(cb_base + 0x0, sctlr_value);
+        // Enable MMU with complete page table structure
+        uint32_t sctlr_value = (1 << 0) | (1 << 2) | (1 << 4); // M, A, C bits enabled
+        write_smmu_register(cb_base + CB_SCTLR_OFFSET, sctlr_value);
 
         SCP_INFO(SCMOD) << "✅ CONSOLIDATED SETUP COMPLETE: CPU " << cpu << " CB" << cb;
         SCP_INFO(SCMOD) << "  - Page tables initialized with consistent addressing";
@@ -886,148 +1023,51 @@ public:
 
     void map_cpu_to_region(uint32_t cpu, uint32_t region)
     {
+        // Validate parameters
+        assert(cpu < m_cpu_to_region.size() && "CPU ID out of range");
+        assert(region < m_num_regions && "Region ID out of range");
+
         if (cpu >= m_cpu_to_region.size()) return;
 
         m_cpu_to_region[cpu] = region;
 
-        // CRITICAL FIX: Use HIGH VA context bank (CB1, CB2) for region mapping
-        // Identity context banks (CB0) should remain untouched
-        uint32_t high_va_cb = cpu + 1;                             // CB1 for CPU0, CB2 for CPU1
-        uint32_t cb_offset_words = ((16 + high_va_cb) * 4096) / 4; // Convert to word offset
-        uint32_t cb_base = SMMU_REG_ADDR + (cb_offset_words * 4);  // Convert back to byte address
+        uint32_t high_va_cb = cpu + 1;
         uint64_t physical_addr = REGION_BASE + (region * REGION_SIZE);
+        const auto pt_addrs = get_page_table_addresses_for_cpu(cpu);
 
-        // CRITICAL FIX: Use separate page table space for high VA context banks
-        // CB1 (CPU 0 high VA) uses offset +4 pages, CB2 (CPU 1 high VA) uses offset +8 pages
-        uint64_t page_table_offset = (cpu + 1) * PAGE_SIZE * 4; // CB1=+4 pages, CB2=+8 pages
-        uint64_t page_table_addr = PAGE_TABLE_BASE + page_table_offset;
+        SCP_INFO(SCMOD) << "Starting map_cpu_to_region for CPU " << cpu << " -> Region " << region;
 
-        SCP_INFO(SCMOD) << "🔍 CRITICAL DEBUG: Starting map_cpu_to_region for CPU " << cpu << " -> Region " << region;
-        SCP_INFO(SCMOD) << "  - High VA CB: CB" << high_va_cb;
-        SCP_INFO(SCMOD) << "  - CB base: 0x" << std::hex << cb_base;
-        SCP_INFO(SCMOD) << "  - Page table addr: 0x" << std::hex << page_table_addr;
-        SCP_INFO(SCMOD) << "  - Physical addr: 0x" << std::hex << physical_addr;
-
-        // CRITICAL FIX: Create page table mapping BEFORE configuring SMMU registers
+        // Step 1: Update page tables
         create_page_table_mapping(cpu, VIRTUAL_TEST_ADDR, physical_addr, REGION_SIZE);
 
-        // First disable MMU to safely reconfigure
-        SCP_INFO(SCMOD) << "  - Step 1: Disabling MMU for safe reconfiguration";
-        write_smmu_register(cb_base + 0x0, 0x0);
-
-        // Add delay after MMU disable
-        wait(sc_core::sc_time(1, sc_core::SC_US));
-
-        // Configure TTBR0 with page table address
-        SCP_INFO(SCMOD) << "  - Step 2: Configuring TTBR0 with page table address 0x" << std::hex << page_table_addr;
-        SCP_INFO(SCMOD) << "    - TTBR0_LOW address: 0x" << std::hex << (cb_base + 0x20);
-        SCP_INFO(SCMOD) << "    - TTBR0_HIGH address: 0x" << std::hex << (cb_base + 0x24);
-        SCP_INFO(SCMOD) << "    - TTBR0_LOW value: 0x" << std::hex
-                        << static_cast<uint32_t>(page_table_addr & 0xFFFFFFFF);
-        SCP_INFO(SCMOD) << "    - TTBR0_HIGH value: 0x" << std::hex
-                        << static_cast<uint32_t>((page_table_addr >> 32) & 0xFFFFFFFF);
-
-        write_smmu_register(cb_base + 0x20, static_cast<uint32_t>(page_table_addr & 0xFFFFFFFF));
-        write_smmu_register(cb_base + 0x24, static_cast<uint32_t>((page_table_addr >> 32) & 0xFFFFFFFF));
-
-        // CRITICAL DEBUG: Read back TTBR0 immediately after writing
-        uint32_t ttbr0_low_readback = read_smmu_register(cb_base + 0x20);
-        uint32_t ttbr0_high_readback = read_smmu_register(cb_base + 0x24);
-        uint64_t ttbr0_readback = (static_cast<uint64_t>(ttbr0_high_readback) << 32) | ttbr0_low_readback;
-        SCP_INFO(SCMOD) << "  - Step 2 VERIFICATION: TTBR0 readback immediately after write";
-        SCP_INFO(SCMOD) << "    - TTBR0_LOW readback: 0x" << std::hex << ttbr0_low_readback;
-        SCP_INFO(SCMOD) << "    - TTBR0_HIGH readback: 0x" << std::hex << ttbr0_high_readback;
-        SCP_INFO(SCMOD) << "    - TTBR0 combined: 0x" << std::hex << ttbr0_readback;
-        if (ttbr0_readback != page_table_addr) {
-            SCP_FATAL(SCMOD) << "🚨 CRITICAL: TTBR0 write/read mismatch! Expected 0x" << std::hex << page_table_addr
-                             << ", got 0x" << ttbr0_readback;
-        }
-
-        // Configure TCR for 4KB pages, 48-bit VA space
-        SCP_INFO(SCMOD) << "  - Step 3: Configuring TCR for 4KB pages";
-        uint32_t tcr_value = (1U << 31) | (16 << 0) | (0 << 14) | (3 << 12) | (1 << 10) | (1 << 8);
-        write_smmu_register(cb_base + 0x30, tcr_value);
-
-        // Configure MAIR for normal memory
-        SCP_INFO(SCMOD) << "  - Step 4: Configuring MAIR";
-        write_smmu_register(cb_base + 0x38, 0xFF); // Normal memory, write-back cacheable
-        write_smmu_register(cb_base + 0x3C, 0x0);
-
-        // CRITICAL DEBUG: Read back TTBR0 before enabling MMU
-        uint32_t ttbr0_low_pre_mmu = read_smmu_register(cb_base + 0x20);
-        uint32_t ttbr0_high_pre_mmu = read_smmu_register(cb_base + 0x24);
-        uint64_t ttbr0_pre_mmu = (static_cast<uint64_t>(ttbr0_high_pre_mmu) << 32) | ttbr0_low_pre_mmu;
-        SCP_INFO(SCMOD) << "  - Step 4 VERIFICATION: TTBR0 readback before MMU enable";
-        SCP_INFO(SCMOD) << "    - TTBR0 before MMU: 0x" << std::hex << ttbr0_pre_mmu;
-        if (ttbr0_pre_mmu != page_table_addr) {
-            SCP_FATAL(SCMOD) << "🚨 CRITICAL: TTBR0 corrupted before MMU enable! Expected 0x" << std::hex
-                             << page_table_addr << ", got 0x" << ttbr0_pre_mmu;
-        }
-
-        // Add delay before enabling MMU
-        wait(sc_core::sc_time(2, sc_core::SC_US));
-
-        // Enable MMU with proper configuration - CRITICAL: M bit must be set for translation
-        uint32_t sctlr_value = (1 << 0) | (1 << 2) | (1 << 4);
-        SCP_INFO(SCMOD) << "  - Step 5: Enabling MMU with SCTLR: 0x" << std::hex << sctlr_value;
-        write_smmu_register(cb_base + 0x0, sctlr_value);
-
-        // Additional delay to ensure MMU enable takes effect
-        wait(sc_core::sc_time(3, sc_core::SC_US));
-
-        // CRITICAL DEBUG: Read back all critical registers after MMU enable
-        uint32_t sctlr_readback = read_smmu_register(cb_base + 0x0);
-        uint32_t ttbr0_low_final = read_smmu_register(cb_base + 0x20);
-        uint32_t ttbr0_high_final = read_smmu_register(cb_base + 0x24);
-        uint64_t ttbr0_final = (static_cast<uint64_t>(ttbr0_high_final) << 32) | ttbr0_low_final;
-
-        bool mmu_enabled = (sctlr_readback & 0x1) != 0;
-
-        SCP_INFO(SCMOD) << "  - Step 5 FINAL VERIFICATION for CB" << high_va_cb << ":";
-        SCP_INFO(SCMOD) << "    - SCTLR write: 0x" << std::hex << sctlr_value;
-        SCP_INFO(SCMOD) << "    - SCTLR read: 0x" << std::hex << sctlr_readback;
-        SCP_INFO(SCMOD) << "    - TTBR0 expected: 0x" << std::hex << page_table_addr;
-        SCP_INFO(SCMOD) << "    - TTBR0 final: 0x" << std::hex << ttbr0_final;
-        SCP_INFO(SCMOD) << "    - MMU enabled: " << (mmu_enabled ? "YES" : "NO");
-
-        if (!mmu_enabled) {
-            SCP_FATAL(SCMOD) << "🚨 CRITICAL: MMU not enabled for high VA CB" << high_va_cb
-                             << " - SCTLR.M bit not set!";
-        }
-
-        if (ttbr0_final != page_table_addr) {
-            SCP_FATAL(SCMOD) << "🚨 CRITICAL: TTBR0 corrupted after MMU enable! Expected 0x" << std::hex
-                             << page_table_addr << ", got 0x" << ttbr0_final;
-        }
+        // Step 2: Reconfigure the context bank to use the updated page tables
+        reconfigure_context_bank(high_va_cb, pt_addrs.l0);
 
         SCP_INFO(SCMOD) << "✅ SMMU mapping completed successfully for CPU " << cpu << " -> Region " << region;
-        SCP_INFO(SCMOD) << "   Final state: CB" << high_va_cb << " TTBR0=0x" << std::hex << ttbr0_final << " SCTLR=0x"
-                        << sctlr_readback << " MMU=" << (mmu_enabled ? "ON" : "OFF");
-
-        // DIAGNOSTIC: show SCTLR live just prior to region assignment
-        uint32_t sctlr_live = read_smmu_register(cb_base + 0x0);
-        SCP_INFO(SCMOD) << "DIAGNOSTIC: CB" << high_va_cb << " SCTLR immediately before region READY: 0x" << std::hex
-                        << sctlr_live << " (MMU enabled? " << ((sctlr_live & 0x1) ? "YES" : "NO") << ")";
     }
 
     void create_page_table_mapping(uint32_t cpu, uint64_t virtual_addr, uint64_t physical_addr, uint64_t size)
     {
+        // Validate parameters
+        assert(cpu < p_num_cpu.get_value() && "CPU ID out of range");
+        assert((physical_addr & 0xFFF) == 0 && "Physical address must be page-aligned");
+        assert((virtual_addr & 0xFFF) == 0 && "Virtual address must be page-aligned");
+        assert(size == REGION_SIZE && "Size must match REGION_SIZE");
+
         // CRITICAL FIX: Create separate page tables for HIGH VA context banks (CB2/CB3)
         // CB2/CB3 need L1[0] to map VA=0x0 directly to the region's physical address
         // This is different from CB0/CB1 which use identity mapping
 
         // Use separate page table space for high VA context banks
-        // CB1 (CPU 0 high VA) uses offset +4 pages, CB2 (CPU 1 high VA) uses offset +8 pages
-        uint32_t high_va_cpu = cpu;                                     // This function is called for high VA mapping
-        uint64_t page_table_offset = (high_va_cpu + 1) * PAGE_SIZE * 4; // CB1=+4 pages, CB2=+8 pages
+        const auto pt_addrs = get_page_table_addresses_for_cpu(cpu);
 
-        uint64_t l0_table_addr = PAGE_TABLE_BASE + page_table_offset;                   // L0 table for high VA CB
-        uint64_t l1_table_addr = PAGE_TABLE_BASE + page_table_offset + PAGE_SIZE;       // L1 table for high VA CB
-        uint64_t l2_table_addr = PAGE_TABLE_BASE + page_table_offset + (PAGE_SIZE * 2); // L2 table for high VA CB
-        uint64_t l3_table_addr = PAGE_TABLE_BASE + page_table_offset + (PAGE_SIZE * 3); // L3 table for high VA CB
+        uint64_t l0_table_addr = pt_addrs.l0;
+        uint64_t l1_table_addr = pt_addrs.l1;
+        uint64_t l2_table_addr = pt_addrs.l2;
+        uint64_t l3_table_addr = pt_addrs.l3;
 
         SCP_INFO(SCMOD) << "🔍 CRITICAL FIX: Creating HIGH VA page tables for CPU " << cpu;
-        SCP_INFO(SCMOD) << "  - High VA CB page table offset: 0x" << std::hex << page_table_offset;
+        SCP_INFO(SCMOD) << "  - High VA CB page table offset: 0x" << std::hex << (pt_addrs.l0 - PAGE_TABLE_BASE);
         SCP_INFO(SCMOD) << "  - L0 table: 0x" << std::hex << l0_table_addr;
         SCP_INFO(SCMOD) << "  - L1 table: 0x" << std::hex << l1_table_addr;
         SCP_INFO(SCMOD) << "  - L2 table: 0x" << std::hex << l2_table_addr;
@@ -1067,37 +1107,41 @@ public:
         invalidate_smmu_tlb(cpu);
     }
 
+    /**
+     * @brief Unmaps a region from a CPU by disabling its high VA context bank.
+     * @param cpu The ID of the CPU to unmap.
+     *
+     * @warning It is critical to only unmap the CPU-specific high VA context
+     * bank (CB1, CB2, etc.) and NEVER CB0. CB0 provides shared identity
+     * mapping for all CPUs and must remain active for the duration of the test.
+     * Disabling CB0 would break identity-mapped accesses for all CPUs.
+     */
     void unmap_cpu_region(uint32_t cpu)
     {
         if (cpu >= m_cpu_to_region.size()) return;
 
-        // CRITICAL FIX: Only unmap HIGH VA context banks (CB1, CB2, CB3...)
-        // NEVER touch CB0 (shared identity context bank used by ALL CPUs)
-        uint32_t high_va_cb = cpu + 1; // CB1 for CPU0, CB2 for CPU1, CB3 for CPU2...
+        // CRITICAL: Only unmap HIGH VA context banks (CB1, CB2, CB3...)
+        // NEVER touch CB0, which is the shared identity context bank.
+        uint32_t high_va_cb = cpu + 1;
 
-        // SAFETY CHECK: Ensure we never accidentally target CB0 (shared by all CPUs)
+        // Safety check to prevent unmapping of the shared identity context bank
         if (high_va_cb == 0) {
-            SCP_FATAL(SCMOD) << "🚨 CRITICAL BUG: Attempted to unmap shared CB0! This would affect ALL CPUs!";
-            SCP_FATAL(SCMOD) << "  CPU " << cpu << " should map to CB" << (cpu + 1) << ", not CB0";
+            SCP_FATAL(SCMOD) << "CRITICAL BUG: Attempt to unmap shared CB0 for CPU " << cpu;
             return;
         }
 
-        uint32_t cb_offset_words = ((16 + high_va_cb) * 4096) / 4; // Convert to word offset
-        uint32_t cb_base = SMMU_REG_ADDR + (cb_offset_words * 4);  // Convert back to byte address
+        uint32_t cb_base = get_context_bank_base(high_va_cb);
 
-        SCP_INFO(SCMOD) << "🔒 CROSS-CPU SAFE UNMAP: CPU " << cpu << " unmapping CB" << high_va_cb
-                        << " (CB0 shared identity remains untouched)";
+        SCP_INFO(SCMOD) << "Unmapping CPU " << cpu << " from CB" << high_va_cb;
 
-        // Only disable the CPU-specific high VA context bank MMU
-        // CB0 (shared identity) remains active for all CPUs
-        write_smmu_register(cb_base + 0x0, 0x0); // Disable MMU in high VA CB only
+        // Disable the MMU for the high VA context bank
+        write_smmu_register(cb_base + CB_SCTLR_OFFSET, 0x0);
 
-        // Clear TTBR registers for this CPU's high VA context bank only
-        write_smmu_register(cb_base + 0x20, 0x0);
-        write_smmu_register(cb_base + 0x24, 0x0);
+        // Clear the TTBR registers
+        write_smmu_register(cb_base + CB_TTBR0_LOW_OFFSET, 0x0);
+        write_smmu_register(cb_base + CB_TTBR0_HIGH_OFFSET, 0x0);
 
-        SCP_INFO(SCMOD) << "✅ SAFE UNMAP COMPLETE: CPU " << cpu << " high VA CB" << high_va_cb
-                        << " disabled, CB0 identity mapping preserved for all CPUs";
+        SCP_INFO(SCMOD) << "Unmap complete for CPU " << cpu << ", high VA CB" << high_va_cb << " disabled.";
         m_cpu_to_region[cpu] = 0xFFFFFFFF;
     }
 
@@ -1342,9 +1386,6 @@ public:
 
             test_complete:
                 // Signal completion - tester will handle global coordination
-//                mov x0, #0x1000
-//                add x0, x0, x20               // Success marker + CPU ID
-//                str x0, [x21, #0x28]          // Write to REG_DEBUG
                 b end
 
             end:
@@ -1370,24 +1411,6 @@ public:
         SCP_INFO(SCMOD) << "  - Main firmware at 0x" << std::hex << MAIN_FIRMWARE_ADDR;
     }
 
-    void timeout_monitor()
-    {
-        SCP_INFO(SCMOD) << "Starting timeout monitor - test will terminate after " << TEST_DURATION;
-
-        wait(TEST_DURATION);
-
-        SCP_WARN(SCMOD) << "⏰ TIMEOUT: Test terminated after " << TEST_DURATION;
-        SCP_INFO(SCMOD) << "Final iterations: " << m_tester_controller.m_global_iterations << "/" << MAX_ITERATIONS;
-
-        if (m_tester_controller.m_global_iterations > 0) {
-            SCP_INFO(SCMOD) << "✓ SMMU stress test V2 COMPLETED with timeout";
-        } else {
-            SCP_WARN(SCMOD) << "⚠ Test completed with no iterations";
-        }
-
-        sc_core::sc_stop();
-    }
-
     void write_smmu_register(uint32_t addr, uint32_t value)
     {
         SCP_INFO(SCMOD) << "ATTEMPTING SMMU WRITE: addr=0x" << std::hex << addr << ", value=0x" << value;
@@ -1405,14 +1428,23 @@ public:
 
     void write_memory_64(uint64_t addr, uint64_t value) { m_memory_accessor.write_memory(addr, value); }
 
+    /**
+     * @brief Invalidates the SMMU TLB for a specific CPU's context bank.
+     * @param cpu The ID of the CPU whose TLB should be invalidated.
+     *
+     * @note This is a critical step after any page table modification. The SMMU
+     * caches translations in its TLB. Failure to invalidate the TLB after a
+     * change can lead to stale translations being used, causing data corruption
+     * or access violations. This function ensures that the SMMU is forced to
+     * re-read the updated page tables.
+     */
     void invalidate_smmu_tlb(uint32_t cpu)
     {
         // CRITICAL FIX: Invalidate SMMU TLB after page table updates
         // The SMMU TLB caches old translations and must be invalidated when page tables change
 
         uint32_t high_va_cb = cpu + 1; // CB1 for CPU0, CB2 for CPU1
-        uint32_t cb_offset_words = ((16 + high_va_cb) * 4096) / 4;
-        uint32_t cb_base = SMMU_REG_ADDR + (cb_offset_words * 4);
+        uint32_t cb_base = get_context_bank_base(high_va_cb);
 
         SCP_INFO(SCMOD) << "🔄 TLB INVALIDATION: Invalidating SMMU TLB for CPU " << cpu << " (CB" << high_va_cb
                         << ") - interrupts disabled during setup";
@@ -1420,13 +1452,8 @@ public:
         // Method 1: Write to TLBIALL register to invalidate all TLB entries for this context bank
         // TLBIALL is per-CB and only affects this specific context bank
         // Since we disabled CFIE during setup, no completion interrupts will be generated
-        uint32_t tlbiall_addr = cb_base + 0x618;
+        uint32_t tlbiall_addr = cb_base + CB_TLBIALL_OFFSET;
         write_smmu_register(tlbiall_addr, 0x0); // Any write invalidates all entries for this CB
-
-        // Method 2: Also invalidate by virtual address (TLBIVA) for the specific VA range
-        // TLBIVA is per-CB and targets specific virtual addresses
-        //        uint32_t tlbiva_addr = cb_base + 0x600;
-        //        write_smmu_register(tlbiva_addr, 0x0); // Invalidate VA=0x0 (our mapped address)
 
         // Add delay to ensure TLB invalidation takes effect
         wait(sc_core::sc_time(2, sc_core::SC_US));
@@ -1452,6 +1479,44 @@ public:
     }
 };
 
+void CpuArmCortexA53SMMUStressTestV2::reconfigure_context_bank(uint32_t cb, uint64_t page_table_addr)
+{
+    uint32_t cb_base = get_context_bank_base(cb);
+
+    // First disable MMU to safely reconfigure
+    SCP_INFO(SCMOD) << "  - Step 1: Disabling MMU for safe reconfiguration";
+    write_smmu_register(cb_base + CB_SCTLR_OFFSET, 0x0);
+
+    // Add delay after MMU disable
+    wait(sc_core::sc_time(1, sc_core::SC_US));
+
+    // Configure TTBR0 with page table address
+    SCP_INFO(SCMOD) << "  - Step 2: Configuring TTBR0 with page table address 0x" << std::hex << page_table_addr;
+    write_smmu_register(cb_base + CB_TTBR0_LOW_OFFSET, static_cast<uint32_t>(page_table_addr & 0xFFFFFFFF));
+    write_smmu_register(cb_base + CB_TTBR0_HIGH_OFFSET, static_cast<uint32_t>((page_table_addr >> 32) & 0xFFFFFFFF));
+
+    // Configure TCR for 4KB pages, 48-bit VA space
+    SCP_INFO(SCMOD) << "  - Step 3: Configuring TCR for 4KB pages";
+    uint32_t tcr_value = (1U << 31) | (16 << 0) | (0 << 14) | (3 << 12) | (1 << 10) | (1 << 8);
+    write_smmu_register(cb_base + CB_TCR_OFFSET, tcr_value);
+
+    // Configure MAIR for normal memory
+    SCP_INFO(SCMOD) << "  - Step 4: Configuring MAIR";
+    write_smmu_register(cb_base + CB_MAIR0_OFFSET, 0xFF); // Normal memory, write-back cacheable
+    write_smmu_register(cb_base + CB_MAIR1_OFFSET, 0x0);
+
+    // Add delay before enabling MMU
+    wait(sc_core::sc_time(2, sc_core::SC_US));
+
+    // Enable MMU with proper configuration - CRITICAL: M bit must be set for translation
+    uint32_t sctlr_value = (1 << 0) | (1 << 2) | (1 << 4);
+    SCP_INFO(SCMOD) << "  - Step 5: Enabling MMU with SCTLR: 0x" << std::hex << sctlr_value;
+    write_smmu_register(cb_base + CB_SCTLR_OFFSET, sctlr_value);
+
+    // Additional delay to ensure MMU enable takes effect
+    wait(sc_core::sc_time(3, sc_core::SC_US));
+}
+
 // Implement the tester controller methods that need access to parent
 void SMMUTesterController::configure_smmu_mapping(uint32_t cpu_id, uint32_t region_id)
 {
@@ -1471,206 +1536,112 @@ void SMMUTesterController::unmap_cpu_region(uint32_t cpu_id)
 bool SMMUTesterController::verify_region_pattern(uint32_t cpu_id, uint32_t region_id)
 {
     if (!m_parent) {
-        SCP_FATAL(SCMOD) << "🚨 CRITICAL: No parent reference for memory access";
+        SCP_FATAL(SCMOD) << "No parent reference for memory access";
         return false;
     }
 
-    // Calculate the physical address of the region
     uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
                              (region_id * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
 
-    SCP_INFO(SCMOD) << "🔍 TESTER VERIFICATION: Checking region " << region_id << " at physical address 0x" << std::hex
-                    << physical_addr;
+    SCP_INFO(SCMOD) << "Verifying region " << region_id << " at physical address 0x" << std::hex << physical_addr;
 
-    // Read the first few 64-bit words from the physical region
     const uint32_t words_to_check = 4;
-    bool verification_success = true;
-
-    for (uint32_t word_offset = 0; word_offset < words_to_check; ++word_offset) {
-        uint64_t word_addr = physical_addr + (word_offset * 8);
+    for (uint32_t i = 0; i < words_to_check; ++i) {
+        uint64_t word_addr = physical_addr + (i * 8);
         uint64_t read_value = m_parent->m_memory_accessor.read_memory(word_addr);
 
-        // Extract components from the pattern
-        // Pattern format: (cpu_id << 32) | (region_id << 16) | iteration
         uint32_t pattern_cpu_id = (read_value >> 32) & 0xFFFFFFFF;
         uint32_t pattern_region_id = (read_value >> 16) & 0xFFFF;
-        uint32_t pattern_iteration = read_value & 0xFFFF;
 
-        SCP_INFO(SCMOD) << "  Word[" << word_offset << "] at 0x" << std::hex << word_addr << ": value=0x" << read_value
-                        << " (CPU=" << std::dec << pattern_cpu_id << ", Region=" << pattern_region_id
-                        << ", Iter=" << pattern_iteration << ")";
-
-        SCP_INFO(SCMOD) << "  Expected: CPU=" << cpu_id << ", Region=" << region_id;
-
-        // Verify that the region ID matches
-        if (pattern_region_id != region_id) {
-            SCP_FATAL(SCMOD) << "🚨 PATTERN MISMATCH: Expected region " << region_id << ", found " << pattern_region_id
-                             << " in word " << word_offset;
-            SCP_FATAL(SCMOD) << "  This indicates a bug in region assignment or CPU pattern generation";
-            verification_success = false;
-            break;
-        }
-
-        // CORRECTED FIX: Verify CPU ID matches expected CPU (the original filler)
-        if (pattern_cpu_id != cpu_id) {
-            SCP_FATAL(SCMOD) << "🚨 CPU ID MISMATCH: Expected CPU " << cpu_id << ", found " << pattern_cpu_id
-                             << " in word " << word_offset;
-            SCP_FATAL(SCMOD) << "  This indicates the wrong CPU filled this region or pattern corruption";
-            verification_success = false;
-            break;
-        }
-
-        // Check that the pattern is not zero (indicating it was actually written)
-        if (read_value == 0) {
-            //            SCP_FATAL(SCMOD) << "🚨 PATTERN MISSING: Found zero value in word " << word_offset
-            //                             << " - pattern was not written or was cleared";
-            //            verification_success = false;
-            //            break;
+        if (pattern_region_id != region_id || pattern_cpu_id != cpu_id) {
+            SCP_FATAL(SCMOD) << "Pattern mismatch in region " << region_id << " at offset " << i;
+            return false;
         }
     }
 
-    if (verification_success) {
-        SCP_INFO(SCMOD) << "✅ TESTER VERIFICATION SUCCESS: Region " << region_id << " contains valid pattern from CPU "
-                        << cpu_id;
-    } else {
-        SCP_FATAL(SCMOD) << "❌ TESTER VERIFICATION FAILED: Region " << region_id << " pattern verification failed";
-    }
-
-    return verification_success;
+    SCP_INFO(SCMOD) << "Region " << region_id << " verification successful";
+    return true;
 }
 
 void SMMUTesterController::clear_region_pattern(uint32_t region_id)
 {
     if (!m_parent) {
-        SCP_FATAL(SCMOD) << "🚨 CRITICAL: No parent reference for memory access";
+        SCP_FATAL(SCMOD) << "No parent reference for memory access";
         return;
     }
 
-    // Calculate the physical address of the region
     uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
                              (region_id * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
 
-    SCP_INFO(SCMOD) << "🧹 TESTER CLEANUP: Clearing region " << region_id << " at physical address 0x" << std::hex
-                    << physical_addr;
+    SCP_INFO(SCMOD) << "Clearing region " << region_id << " at physical address 0x" << std::hex << physical_addr;
 
-    // Clear the entire region by writing zeros
-    uint64_t pattern_size_words = CpuArmCortexA53SMMUStressTestV2::PATTERN_SIZE;
-
-    for (uint64_t word_offset = 0; word_offset < pattern_size_words; ++word_offset) {
-        uint64_t word_addr = physical_addr + (word_offset * 8);
-        m_parent->write_memory_64(word_addr, 0);
+    for (uint64_t i = 0; i < CpuArmCortexA53SMMUStressTestV2::PATTERN_SIZE; ++i) {
+        m_parent->write_memory_64(physical_addr + (i * 8), 0);
     }
 
-    SCP_INFO(SCMOD) << "✅ TESTER CLEANUP COMPLETE: Region " << region_id << " cleared (" << std::dec
-                    << pattern_size_words << " words zeroed)";
+    SCP_INFO(SCMOD) << "Region " << region_id << " cleared";
 }
 
 /* ---- Implementation moved here to ensure CpuArmCortexA53SMMUStressTestV2 is a complete type ---- */
 
+/**
+ * @brief Handles a completion notification from a CPU.
+ * @param cpu_id The ID of the completing CPU.
+ * @param complete The type of completion (FILL_DONE or CHECK_DONE).
+ *
+ * @note This method serves as a critical section for managing shared
+ * resources like region queues and global iteration counts. The serialization
+ * of calls through `b_transport` ensures that updates to these resources
+ * are atomic, preventing race conditions.
+ */
 void SMMUTesterController::handle_complete(uint32_t cpu_id, CompleteType complete)
 {
     CPUState& cpu = m_cpu_states[cpu_id];
 
     if (complete == FILL_DONE) {
-        SCP_INFO(SCMOD) << "🔍 CRITICAL DEBUG: handle_complete called for CPU " << cpu_id;
-        SCP_INFO(SCMOD) << "  - CPU state assigned_region: " << cpu.assigned_region;
-        SCP_INFO(SCMOD) << "  - CPU state current_request: " << (int)cpu.current_request;
-        SCP_INFO(SCMOD) << "  - CPU state is_working: " << cpu.is_working;
-
-        // CRITICAL: Validate that assigned_region is reasonable
         if (cpu.assigned_region >= m_num_regions) {
-            SCP_FATAL(SCMOD) << "🚨 CRITICAL BUG: CPU " << cpu_id << " has invalid assigned_region "
-                             << cpu.assigned_region << " (max regions: " << m_num_regions << ")";
+            SCP_FATAL(SCMOD) << "CRITICAL BUG: CPU " << cpu_id << " has invalid assigned_region "
+                             << cpu.assigned_region;
             sc_core::sc_stop();
             return;
         }
 
         SCP_INFO(SCMOD) << "CPU " << cpu_id << " completed filling region " << cpu.assigned_region;
 
-        // Diagnostic: dump first 4 words BEFORE verification
-        if (m_parent) {
-            uint64_t phys = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
-                            (cpu.assigned_region * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
-            SCP_INFO(SCMOD) << "DEBUG: Region " << cpu.assigned_region << " @0x" << std::hex << phys
-                            << " BEFORE verify_region_pattern:";
-            for (uint64_t i = 0; i < 4; ++i) {
-                uint64_t val = m_parent->m_memory_accessor.read_memory(phys + 8 * i);
-                SCP_INFO(SCMOD) << "  Pre-verif word[" << i << "] = 0x" << std::hex << val;
-            }
-        }
-
-        // NEW APPROACH: Extract the original filler CPU from the pattern and verify against that
-        // First read the pattern to determine which CPU originally filled this region
         uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
                                  (cpu.assigned_region * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
         uint64_t first_word = m_parent->m_memory_accessor.read_memory(physical_addr);
         uint32_t original_filler_cpu = (first_word >> 32) & 0xFFFFFFFF;
 
-        SCP_INFO(SCMOD) << "🔍 PATTERN ANALYSIS: Region " << cpu.assigned_region << " first word=0x" << std::hex
-                        << first_word << " indicates original filler CPU=" << std::dec << original_filler_cpu;
-
-        // Verify against the original filler CPU, not the current CPU
-        bool verification_success = verify_region_pattern(original_filler_cpu, cpu.assigned_region);
-
-        // Diagnostic: dump after verify (regardless of result)
-        if (m_parent) {
-            uint64_t phys = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
-                            (cpu.assigned_region * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
-            SCP_INFO(SCMOD) << "DEBUG: Region " << cpu.assigned_region << " @0x" << std::hex << phys
-                            << " AFTER verify_region_pattern:";
-            for (uint64_t i = 0; i < 4; ++i) {
-                uint64_t val = m_parent->m_memory_accessor.read_memory(phys + 8 * i);
-                SCP_INFO(SCMOD) << "  Post-verif word[" << i << "] = 0x" << std::hex << val;
-            }
-        }
-
-        if (verification_success) {
-            SCP_INFO(SCMOD) << "✅ TESTER VERIFICATION SUCCESS: Region " << cpu.assigned_region
-                            << " pattern verified by tester controller";
-
-            // Clear the region after successful verification
+        if (verify_region_pattern(original_filler_cpu, cpu.assigned_region)) {
+            SCP_INFO(SCMOD) << "Region " << cpu.assigned_region << " verified by tester";
             clear_region_pattern(cpu.assigned_region);
-
-            // Return region to available queue immediately
             m_available_regions.push(cpu.assigned_region);
-
-            // Increment iteration count for successful fill+verify cycle
             cpu.iteration_count++;
             m_global_iterations++;
-
         } else {
-            SCP_FATAL(SCMOD) << "🚨 TESTER VERIFICATION FAILED: Region " << cpu.assigned_region
-                             << " pattern verification failed - stopping test";
+            SCP_FATAL(SCMOD) << "Region " << cpu.assigned_region << " verification failed";
             sc_core::sc_stop();
             return;
         }
 
     } else if (complete == CHECK_DONE) {
-        // This branch should no longer be used with the new approach
-        SCP_WARN(SCMOD) << "CPU " << cpu_id << " reported CHECK_DONE - this should not happen with new approach";
-
-        // Return region to available queue
+        SCP_WARN(SCMOD) << "CHECK_DONE reported by CPU " << cpu_id << " - this path is deprecated";
         m_available_regions.push(cpu.assigned_region);
-
-        // Increment iteration count
         cpu.iteration_count++;
         m_global_iterations++;
     }
 
-    // Unmap region from CPU
     unmap_cpu_region(cpu_id);
 
-    // Reset CPU state
     cpu.current_request = NONE;
     cpu.assigned_region = 0xFFFFFFFF;
     cpu.is_working = false;
     cpu.status = COMPLETE;
 
-    // Check if we've reached target iterations
     if (m_global_iterations >= m_target_iterations) {
-        SCP_INFO(SCMOD) << "✅ TARGET REACHED: " << m_global_iterations << "/" << m_target_iterations
-                        << " iterations completed";
-        //        sc_core::sc_stop();
+        SCP_INFO(SCMOD) << "Target iterations reached: " << m_global_iterations;
+        sc_core::sc_stop();
     }
 }
 
@@ -1690,7 +1661,7 @@ int sc_main(int argc, char* argv[])
     SCP_INFO("sc_main") << "Start SMMU Stress Test V2 - Tester Controlled";
     CpuArmCortexA53SMMUStressTestV2 test_bench("test-bench");
 
-    if ((gs::cci_get<int>(broker_h,"test-bench.num_cpu") > 8) ||
+    if ((gs::cci_get<int>(broker_h, "test-bench.num_cpu") > 8) ||
         gs::cci_get_d<bool>(broker_h, "test-bench.inst_a.icount", false)) {
         SCP_INFO("sc_main")("Refusing to run more than 8 CPUs, or icount mode");
         exit(0);
