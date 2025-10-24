@@ -448,7 +448,7 @@ private:
 class CpuArmCortexA53SMMUStressTestV2 : public TestBench, public CpuTesterCallbackIface
 {
 public:
-    static constexpr uint16_t MAX_ITERATIONS = 1000; // Limited to 16-bit for ARM64 movz instruction
+    static constexpr uint16_t MAX_ITERATIONS = 0x7fff; // Limited to 16-bit for ARM64 movz instruction
     static constexpr uint64_t PATTERN_SIZE = 16;
     sc_core::sc_time TEST_DURATION = sc_core::sc_time(30, sc_core::SC_SEC);
 
@@ -1254,53 +1254,55 @@ public:
 
                 // Fill the region at virtual address
                 ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR
-                mov x4, #%llu                 // Pattern size
+                mov x4, #8                    // Words to write at each boundary
                 mov x5, #0                    // Offset counter
                 
-                // DEBUG: Signal start of fill with first address
-                mov x0, #0x6000
-                orr x0, x0, x23               // Include region ID
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
-                
-            fill_loop:
+            fill_loop_start:
                 cmp x5, x4
-                b.ge fill_done
+                b.ge fill_loop_end
                 
-                // Generate pattern fresh each iteration to avoid corruption
-                lsl x24, x20, #32             // CPU_ID << 32
-                lsl x25, x23, #16             // region_ID << 16
+                // Generate pattern
+                lsl x24, x20, #32
+                lsl x25, x23, #16
                 orr x24, x24, x25
-                orr x24, x24, x22             // Add iteration counter
+                orr x24, x24, x22
                 
-                lsl x6, x5, #3                // offset * 8
-                add x6, x3, x6                // Virtual address + offset
-                
-                // DEBUG: Log first few writes with address and pattern
-                cmp x5, #4
-                b.ge skip_debug_write
-                mov x0, #0x7000
-                orr x0, x0, x5                // Include offset
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
-                str x24, [x21, #0x30]
-                str x6, [x21, #0x30]                
-
-            skip_debug_write:
-                str x24, [x6]                 // Store pattern
+                // Write at the beginning of the block
+                lsl x6, x5, #3
+                add x6, x3, x6
+                str x24, [x6]
                 
                 add x5, x5, #1
-                b fill_loop
-            fill_done:
+                b fill_loop_start
                 
-                // DEBUG: Signal end of fill
-                mov x0, #0x8000
-                orr x0, x0, x23               // Include region ID
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
+            fill_loop_end:
+                mov x5, #0
+            fill_loop_start_end:
+                cmp x5, x4
+                b.ge fill_done
 
+                // Generate pattern
+                lsl x24, x20, #32
+                lsl x25, x23, #16
+                orr x24, x24, x25
+                orr x24, x24, x22
+
+                // Write at the end of the block
+                mov x6, #4096
+                sub x6, x6, #64
+                add x6, x3, x6
+                lsl x7, x5, #3
+                add x6, x6, x7
+                str x24, [x6]
+
+                add x5, x5, #1
+                b fill_loop_start_end
+
+            fill_done:
                 // Signal fill complete
-                mov x0, #1                    // FILL_DONE
-                str x0, [x21, #0x18]          // Write to REG_COMPLETE
+                mov x0, #1
+                str x0, [x21, #0x18]
 
-                // Increment iteration
                 add x22, x22, #1
                 b main_loop
 
@@ -1309,7 +1311,6 @@ public:
                 mov x0, #2                    // CHECK_REQUEST
                 str x0, [x21, #0x00]          // Write to REG_REQUEST
 
-                // Poll for readiness
             poll_check:
                 ldr x0, [x21, #0x08]          // Read REG_STATUS
                 cmp x0, #1                    // READY?
@@ -1320,72 +1321,96 @@ public:
 
             check_ready:
                 // Get assigned region ID
-                ldr x23, [x21, #0x10]         // Read REG_REGION_ID
-                
-                // Signal starting work
-                mov x0, #0x4000
-                orr x0, x0, x23               // Include region ID
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
+                ldr x23, [x21, #0x10]
 
-                // Verify region pattern (check first few words)
+                // Verify region pattern
                 ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR
-                mov x5, #0                    // Offset counter
-                mov x6, #4                    // Check first 4 words
-            verify_loop:
+                mov x5, #0
+                mov x6, #8
+            verify_loop_start:
                 cmp x5, x6
-                b.ge verify_success
+                b.ge verify_loop_end
+
+                lsl x7, x5, #3
+                add x7, x3, x7
+                ldr x8, [x7]
                 
-                lsl x7, x5, #3                // offset * 8
-                add x7, x3, x7                // Virtual address + offset
-                ldr x8, [x7]                  // Load value
-                
-                // Extract region ID from pattern (bits 16-31)
                 lsr x9, x8, #16
                 and x9, x9, #0xFFFF
                 cmp x9, x23
                 b.ne pattern_error
                 
                 add x5, x5, #1
-                b verify_loop
+                b verify_loop_start
 
-            verify_success:
-                // Signal verify success
-                mov x0, #0x5000
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
+            verify_loop_end:
+                mov x5, #0
+            verify_loop_start_end:
+                cmp x5, x6
+                b.ge verify_success
 
-                // Clear region
-                ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR
-                mov x4, #%llu                 // Pattern size
-                mov x7, #0                    // Zero value
-                mov x5, #0                    // Offset counter
-            clear_loop:
-                cmp x5, x4
-                b.ge clear_done
-                
-                lsl x8, x5, #3                // offset * 8
-                add x8, x3, x8                // Virtual address + offset
-                str x7, [x8]                  // Store zero
+                mov x7, #4096
+                sub x7, x7, #64
+                add x7, x3, x7
+                lsl x8, x5, #3
+                add x7, x7, x8
+                ldr x8, [x7]
+
+                lsr x9, x8, #16
+                and x9, x9, #0xFFFF
+                cmp x9, x23
+                b.ne pattern_error
                 
                 add x5, x5, #1
-                b clear_loop
+                b verify_loop_start_end
+
+            verify_success:
+                // Clear region
+                ldr x3, =0x%016)" PRIx64 R"(
+                mov x4, #8
+                mov x7, #0
+                mov x5, #0
+            clear_loop_start:
+                cmp x5, x4
+                b.ge clear_loop_end
+
+                lsl x8, x5, #3
+                add x8, x3, x8
+                str x7, [x8]
+                
+                add x5, x5, #1
+                b clear_loop_start
+
+            clear_loop_end:
+                mov x5, #0
+            clear_loop_start_end:
+                cmp x5, x4
+                b.ge clear_done
+
+                mov x8, #4096
+                sub x8, x8, #64
+                add x8, x3, x8
+                lsl x9, x5, #3
+                add x8, x8, x9
+                str x7, [x8]
+                
+                add x5, x5, #1
+                b clear_loop_start_end
+
             clear_done:
-
                 // Signal check complete
-                mov x0, #2                    // CHECK_DONE
-                str x0, [x21, #0x18]          // Write to REG_COMPLETE
+                mov x0, #2
+                str x0, [x21, #0x18]
 
-                // Increment iteration
                 add x22, x22, #1
                 b main_loop
 
             pattern_error:
-                // Signal pattern verification failure
                 mov x0, #0xD000
-                str x0, [x21, #0x28]          // Write to REG_DEBUG
+                str x0, [x21, #0x28]
                 b end
 
             test_complete:
-                // Signal completion - tester will handle global coordination
                 b end
 
             end:
@@ -1398,10 +1423,11 @@ public:
                       TESTER_ADDR,       // Parameter 1: TESTER_ADDR
                       MAX_ITERATIONS,    // Parameter 2: MAX_ITERATIONS
                       VIRTUAL_TEST_ADDR, // Parameter 3: VIRTUAL_TEST_ADDR (fill)
-                      PATTERN_SIZE,      // Parameter 4: PATTERN_SIZE (fill)
-                      VIRTUAL_TEST_ADDR, // Parameter 5: VIRTUAL_TEST_ADDR (verify)
-                      VIRTUAL_TEST_ADDR, // Parameter 6: VIRTUAL_TEST_ADDR (clear)
-                      PATTERN_SIZE);     // Parameter 7: PATTERN_SIZE (clear)
+                      VIRTUAL_TEST_ADDR, // Parameter 4: VIRTUAL_TEST_ADDR (verify)
+                      VIRTUAL_TEST_ADDR, // Parameter 5: VIRTUAL_TEST_ADDR (clear)
+                      PATTERN_SIZE,      // Parameter 6: PATTERN_SIZE (clear)
+                      VIRTUAL_TEST_ADDR, // Parameter 7: VIRTUAL_TEST_ADDR (clear)
+                      PATTERN_SIZE);     // Parameter 8: PATTERN_SIZE (clear)
 
         set_firmware(main_buf, MAIN_FIRMWARE_ADDR);
 
@@ -1545,7 +1571,8 @@ bool SMMUTesterController::verify_region_pattern(uint32_t cpu_id, uint32_t regio
 
     SCP_INFO(SCMOD) << "Verifying region " << region_id << " at physical address 0x" << std::hex << physical_addr;
 
-    const uint32_t words_to_check = 4;
+    const uint32_t words_to_check = 8;
+    // Check the beginning of the block
     for (uint32_t i = 0; i < words_to_check; ++i) {
         uint64_t word_addr = physical_addr + (i * 8);
         uint64_t read_value = m_parent->m_memory_accessor.read_memory(word_addr);
@@ -1554,7 +1581,22 @@ bool SMMUTesterController::verify_region_pattern(uint32_t cpu_id, uint32_t regio
         uint32_t pattern_region_id = (read_value >> 16) & 0xFFFF;
 
         if (pattern_region_id != region_id || pattern_cpu_id != cpu_id) {
-            SCP_FATAL(SCMOD) << "Pattern mismatch in region " << region_id << " at offset " << i;
+            SCP_FATAL(SCMOD) << "Pattern mismatch in region " << region_id << " at beginning offset " << i;
+            return false;
+        }
+    }
+
+    // Check the end of the block
+    for (uint32_t i = 0; i < words_to_check; ++i) {
+        uint64_t word_addr = physical_addr + CpuArmCortexA53SMMUStressTestV2::REGION_SIZE - (words_to_check * 8) +
+                             (i * 8);
+        uint64_t read_value = m_parent->m_memory_accessor.read_memory(word_addr);
+
+        uint32_t pattern_cpu_id = (read_value >> 32) & 0xFFFFFFFF;
+        uint32_t pattern_region_id = (read_value >> 16) & 0xFFFF;
+
+        if (pattern_region_id != region_id || pattern_cpu_id != cpu_id) {
+            SCP_FATAL(SCMOD) << "Pattern mismatch in region " << region_id << " at end offset " << i;
             return false;
         }
     }
@@ -1575,8 +1617,16 @@ void SMMUTesterController::clear_region_pattern(uint32_t region_id)
 
     SCP_INFO(SCMOD) << "Clearing region " << region_id << " at physical address 0x" << std::hex << physical_addr;
 
-    for (uint64_t i = 0; i < CpuArmCortexA53SMMUStressTestV2::PATTERN_SIZE; ++i) {
+    const uint32_t words_to_clear = 8;
+    // Clear the beginning of the block
+    for (uint32_t i = 0; i < words_to_clear; ++i) {
         m_parent->write_memory_64(physical_addr + (i * 8), 0);
+    }
+
+    // Clear the end of the block
+    for (uint32_t i = 0; i < words_to_clear; ++i) {
+        m_parent->write_memory_64(
+            physical_addr + CpuArmCortexA53SMMUStressTestV2::REGION_SIZE - (words_to_clear * 8) + (i * 8), 0);
     }
 
     SCP_INFO(SCMOD) << "Region " << region_id << " cleared";
