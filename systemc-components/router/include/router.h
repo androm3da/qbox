@@ -14,7 +14,7 @@
 #include <map>
 #include <set>           // Required for std::set
 #include <limits>        // Required for std::numeric_limits
-#include <memory>        // Required for std::shared_ptr
+#include <memory>        // Required for std::shared_ptrs
 #include <unordered_map> // Required for std::unordered_map
 #include <list>          // Required for std::list
 #include <functional>    // Required for std::less
@@ -22,6 +22,7 @@
 #define THREAD_SAFE true
 #if THREAD_SAFE == true
 #include <mutex>
+#include <shared_mutex>
 #endif
 
 #include <cci_configuration>
@@ -42,6 +43,53 @@
 
 namespace gs {
 
+template <typename Key, typename Value>
+class AddrMapCacheBase
+{
+public:
+    virtual ~AddrMapCacheBase() = default;
+    virtual bool get(const Key& key, Value& value) = 0;
+    virtual void put(const Key& key, const Value& value, uint64_t size) = 0;
+    virtual void clear() = 0;
+
+    // Statistics interface
+    virtual long long get_hits() const = 0;
+    virtual long long get_misses() const = 0;
+    virtual void reset_stats() = 0;
+};
+
+/**
+ * @brief AddrMapNoCache - A cache implementation that never caches (always misses).
+ *
+ */
+template <typename Key, typename Value>
+class AddrMapNoCache : public AddrMapCacheBase<Key, Value>
+{
+public:
+    /// @brief Always returns false (cache miss)
+    bool get(const Key& key, Value& value) override
+    {
+        (void)key;   // Suppress unused parameter warning
+        (void)value; // Suppress unused parameter warning
+        return false;
+    }
+
+    /// @brief Does nothing (no caching)
+    void put(const Key& key, const Value& value, [[maybe_unused]] uint64_t size) override
+    {
+        (void)key;   // Suppress unused parameter warning
+        (void)value; // Suppress unused parameter warning
+    }
+
+    /// @brief Does nothing (nothing to clear)
+    void clear() override {}
+
+    // Statistics interface implementation
+    long long get_hits() const override { return 0; }
+    long long get_misses() const override { return 0; }
+    void reset_stats() override {}
+};
+
 /**
  * @class router
  * @brief A SystemC TLM router module for transaction routing based on address.
@@ -52,9 +100,24 @@ namespace gs {
  *
  * @tparam BUSWIDTH The TLM bus width in bits.
  */
-template <unsigned int BUSWIDTH = DEFAULT_TLM_BUSWIDTH>
+template <unsigned int BUSWIDTH = DEFAULT_TLM_BUSWIDTH, template <typename, typename> class CacheType = AddrMapNoCache>
 class router : public sc_core::sc_module, public gs::router_if<BUSWIDTH>
 {
+    /// @brief Type alias for TLM target socket.
+    using TargetSocket = tlm::tlm_base_target_socket_b<BUSWIDTH, tlm::tlm_fw_transport_if<>,
+                                                       tlm::tlm_bw_transport_if<>>;
+    /// @brief Type alias for TLM initiator socket.
+    using InitiatorSocket = tlm::tlm_base_initiator_socket_b<BUSWIDTH, tlm::tlm_fw_transport_if<>,
+                                                             tlm::tlm_bw_transport_if<>>;
+    /// @brief Type alias for target_info from the router_if base class.
+    using typename gs::router_if<BUSWIDTH>::target_info;
+    /// @brief Type alias for multi-passthrough initiator socket with spying capability.
+    using initiator_socket_type = typename gs::router<
+        BUSWIDTH, CacheType>::template multi_passthrough_initiator_socket_spying<router<BUSWIDTH, CacheType>>;
+    /// @brief Access to bound_targets from the base class.
+    using gs::router_if<BUSWIDTH>::bound_targets;
+
+    using CacheImpl = CacheType<uint64_t, std::shared_ptr<target_info>>;
     /**
      * @class addressMap
      * @brief High-performance address map with automatic region splitting and priority resolution.
@@ -72,9 +135,8 @@ class router : public sc_core::sc_module, public gs::router_if<BUSWIDTH>
      * - Thread-safe design compatible with SystemC simulation
      *
      * @tparam TargetInfoType The type of target information to store (typically target_info)
-     * @tparam CACHESIZE Size of LRU cache for fast lookups (default: 64K entries)
      */
-    template <typename TargetInfoType, int CACHESIZE = 0x10000>
+    template <typename TargetInfoType>
     class addressMap
     {
     private:
@@ -95,78 +157,7 @@ class router : public sc_core::sc_module, public gs::router_if<BUSWIDTH>
         /// @brief Map of regions keyed by start address for O(log n) lookups
         std::map<uint64_t, Region> m_regions;
 
-        /**
-         * @brief High-performance LRU cache for frequently accessed addresses.
-         *
-         * Uses a combination of std::list (for LRU ordering) and std::unordered_map
-         * (for O(1) key lookups) to provide fast caching with automatic eviction.
-         *
-         * @tparam Key Address type (uint64_t)
-         * @tparam Value Cached target info (shared_ptr<TargetInfoType>)
-         * @tparam Capacity Maximum number of cached entries
-         */
-        template <typename Key, typename Value, size_t Capacity>
-        class LRUCache
-        {
-            using ListIt = typename std::list<std::pair<Key, Value>>::iterator;
-            std::list<std::pair<Key, Value>> m_list; ///< LRU-ordered list of entries
-            std::unordered_map<Key, ListIt> m_map;   ///< Hash map for O(1) key lookup
-
-        public:
-            /**
-             * @brief Retrieve value from cache and update LRU order.
-             * @param key Address to look up
-             * @param value Output parameter for the cached value
-             * @return true if found in cache, false otherwise
-             */
-            bool get(const Key& key, Value& value)
-            {
-                auto it = m_map.find(key);
-                if (it == m_map.end()) return false;
-
-                // Move to front (most recently used)
-                m_list.splice(m_list.begin(), m_list, it->second);
-                value = it->second->second;
-                return true;
-            }
-
-            /**
-             * @brief Insert or update value in cache with LRU eviction.
-             * @param key Address to cache
-             * @param value Target info to cache
-             */
-            void put(const Key& key, const Value& value)
-            {
-                auto it = m_map.find(key);
-                if (it != m_map.end()) {
-                    // Update existing entry and move to front
-                    it->second->second = value;
-                    m_list.splice(m_list.begin(), m_list, it->second);
-                    return;
-                }
-
-                // Evict least recently used entry if at capacity
-                if (m_list.size() == Capacity) {
-                    auto last = m_list.back();
-                    m_map.erase(last.first);
-                    m_list.pop_back();
-                }
-
-                // Insert new entry at front
-                m_list.emplace_front(key, value);
-                m_map[key] = m_list.begin();
-            }
-
-            /// @brief Clear all cached entries
-            void clear()
-            {
-                m_list.clear();
-                m_map.clear();
-            }
-        };
-
-        /// @brief LRU cache for fast repeated address lookups
-        LRUCache<uint64_t, std::shared_ptr<TargetInfoType>, CACHESIZE> m_cache;
+        CacheImpl m_cache;
 
         /**
          * @brief Split and resolve overlapping regions using priority-based conflict resolution.
@@ -336,7 +327,7 @@ class router : public sc_core::sc_module, public gs::router_if<BUSWIDTH>
          * @param address The address to look up
          * @return Shared pointer to target info if found, nullptr if address is unmapped
          */
-        std::shared_ptr<TargetInfoType> find(uint64_t address)
+        std::shared_ptr<TargetInfoType> find(uint64_t address, uint64_t size)
         {
             // Fast path: check LRU cache first
             std::shared_ptr<TargetInfoType> cached_result;
@@ -353,13 +344,13 @@ class router : public sc_core::sc_module, public gs::router_if<BUSWIDTH>
                 // Check if address falls within this region [start, end)
                 if (address >= it->second.start && address < it->second.end) {
                     // Cache the result for future lookups
-                    m_cache.put(address, it->second.target);
+                    m_cache.put(address, it->second.target, size);
                     return it->second.target;
                 }
             }
 
             // Address not found - cache the negative result to avoid repeated lookups
-            m_cache.put(address, nullptr);
+            m_cache.put(address, nullptr, size);
             return nullptr;
         }
 
@@ -420,25 +411,27 @@ class router : public sc_core::sc_module, public gs::router_if<BUSWIDTH>
             dmi.set_end_address(hole_end == 0 ? 0 : hole_end - 1); // Handle edge case
             return nullptr;
         }
+
+        /**
+         * @brief Get cache statistics (hits and misses).
+         * @param hits Output parameter for number of cache hits
+         * @param misses Output parameter for number of cache misses
+         */
+        void get_cache_stats(long long& hits, long long& misses) const
+        {
+            hits = m_cache.get_hits();
+            misses = m_cache.get_misses();
+        }
+
+        /**
+         * @brief Reset cache statistics to zero.
+         */
+        void reset_cache_stats() { m_cache.reset_stats(); }
     };
 
     SCP_LOGGER_VECTOR(D);
     SCP_LOGGER(());
     SCP_LOGGER((DMI), "dmi");
-
-    /// @brief Type alias for TLM target socket.
-    using TargetSocket = tlm::tlm_base_target_socket_b<BUSWIDTH, tlm::tlm_fw_transport_if<>,
-                                                       tlm::tlm_bw_transport_if<>>;
-    /// @brief Type alias for TLM initiator socket.
-    using InitiatorSocket = tlm::tlm_base_initiator_socket_b<BUSWIDTH, tlm::tlm_fw_transport_if<>,
-                                                             tlm::tlm_bw_transport_if<>>;
-    /// @brief Type alias for target_info from the router_if base class.
-    using typename gs::router_if<BUSWIDTH>::target_info;
-    /// @brief Type alias for multi-passthrough initiator socket with spying capability.
-    using initiator_socket_type = typename gs::router<BUSWIDTH>::template multi_passthrough_initiator_socket_spying<
-        router<BUSWIDTH>>;
-    /// @brief Access to bound_targets from the base class.
-    using gs::router_if<BUSWIDTH>::bound_targets;
 
 private:
 #if THREAD_SAFE == true
@@ -584,7 +577,7 @@ public:
     /// @brief Initiator socket to connect to targets.
     initiator_socket_type initiator_socket;
     /// @brief Target socket to receive transactions from initiators.
-    tlm_utils::multi_passthrough_target_socket<router<BUSWIDTH>, BUSWIDTH> target_socket;
+    tlm_utils::multi_passthrough_target_socket<router<BUSWIDTH, CacheType>, BUSWIDTH> target_socket;
     /// @brief CCI broker handle for configuration parameters.
     cci::cci_broker_handle m_broker;
 
@@ -708,6 +701,9 @@ private:
      */
     unsigned int transport_dbg(int id, tlm::tlm_generic_payload& trans)
     {
+        // Ensure router is initialized (thread-safe)
+        lazy_initialize();
+
         sc_dt::uint64 addr = trans.get_address();
         auto ti = decode_address(trans);
         if (!ti) {
@@ -736,7 +732,9 @@ private:
      */
     bool get_direct_mem_ptr(int id, tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
     {
-        std::lock_guard<std::mutex> lock(m_dmi_mutex);
+        // Ensure router is initialized (thread-safe)
+        lazy_initialize();
+
         sc_dt::uint64 addr = trans.get_address();
 
         tlm::tlm_dmi dmi_data_hole;
@@ -754,6 +752,11 @@ private:
         if (!ti) {
             return false;
         }
+#if THREAD_SAFE == true
+        if (!m_dmi_mutex.try_lock()) { // if we're busy invalidating, dont grant DMI's
+            return false;
+        }
+#endif
 
         if (ti->use_offset) trans.set_address(addr - ti->address);
         SCP_TRACE((D[ti->index]), ti->name) << "calling get_direct_mem_ptr : " << scp::scp_txn_tostring(trans);
@@ -778,6 +781,9 @@ private:
         }
         SCP_DEBUG(())
         ("Providing DMI (status {:x}) {:x} - {:x}", status, dmi_data.get_start_address(), dmi_data.get_end_address());
+#if THREAD_SAFE == true
+        m_dmi_mutex.unlock();
+#endif
         return status;
     }
 
@@ -797,7 +803,9 @@ private:
             start = id_targets[id]->address + start;
             end = id_targets[id]->address + end;
         }
+#if THREAD_SAFE == true
         std::lock_guard<std::mutex> lock(m_dmi_mutex);
+#endif
         invalidate_direct_mem_ptr_ts(id, start, end);
     }
 
@@ -852,6 +860,7 @@ private:
         }
     }
 
+protected:
     /**
      * @brief Decodes the address from a TLM generic payload to find the target.
      *
@@ -867,10 +876,9 @@ private:
         lazy_initialize();
 
         sc_dt::uint64 addr = trans.get_address();
-        return m_address_map.find(addr);
+        return m_address_map.find(addr, trans.get_data_length());
     }
 
-protected:
     /**
      * @brief Called before end of elaboration to ensure lazy initialization.
      *
@@ -882,22 +890,65 @@ protected:
     }
 
 private:
-    /// @brief Flag to track if lazy initialization has occurred.
-    bool initialized = false;
+    /// @brief Atomic flag to track if lazy initialization has occurred (thread-safe).
+    std::atomic<bool> m_initialized{ false };
+    /// @brief Mutex to protect lazy initialization.
+#if THREAD_SAFE == true
+    std::mutex m_init_mutex;
+#endif
+    std::list<std::string> get_matching_children(cci::cci_broker_handle broker, const std::string& prefix,
+                                                 const std::vector<cci_name_value_pair>& list)
+    {
+        size_t prefix_len = prefix.length() + 1; // +1 for the dot separator
+        std::list<std::string> children;
+        for (const auto& p : list) {
+            if (p.first.find(prefix) == 0) {
+                // Extract the child name after the prefix
+                std::string child = p.first.substr(prefix_len, p.first.find(".", prefix_len) - prefix_len);
+                children.push_back(child);
+            }
+        }
+        children.sort();
+        children.unique();
+        return children;
+    }
 
     /**
-     * @brief Performs lazy initialization of the router's address map.
+     * @brief Performs lazy initialization of the router's address map (thread-safe).
      *
      * This method is responsible for configuring the address map based on the
      * `bound_targets` and CCI parameters. It retrieves address, size, offset,
      * chained, and priority information for each target and its aliases,
      * then adds them to the `m_address_map`. This method is an override
      * of the virtual function in `router_if`.
+     *
+     * Thread-safety: Uses double-checked locking with atomic flag for performance.
+     * - Fast path: Lock-free check if already initialized
+     * - Slow path: Mutex-protected initialization with double-check
      */
     void lazy_initialize() override
     {
-        if (initialized) return;
-        initialized = true;
+        // Fast path: check if already initialized (lock-free)
+        if (m_initialized.load(std::memory_order_acquire)) {
+            return;
+        }
+
+#if THREAD_SAFE == true
+        // Slow path: acquire lock and initialize
+        std::lock_guard<std::mutex> lock(m_init_mutex);
+#endif
+
+        // Double-check: another thread may have initialized while we waited
+        if (m_initialized.load(std::memory_order_relaxed)) {
+            return;
+        }
+
+        // Perform initialization
+        // Get filtered range and convert to vector to materialize the results
+        auto all_alias_range = m_broker.get_unconsumed_preset_values([](const std::pair<std::string, cci_value>& iv) {
+            return iv.first.find(".aliases.") != std::string::npos;
+        });
+        std::vector<cci_name_value_pair> all_alias(all_alias_range.begin(), all_alias_range.end());
 
         for (auto& ti_ptr : bound_targets) {
             std::string name = ti_ptr->name;
@@ -935,8 +986,7 @@ private:
 
             // Add the shared_ptr to the address map
             m_address_map.add(ti_ptr);
-
-            for (std::string n : gs::sc_cci_children((ti_ptr->name + ".aliases").c_str())) {
+            for (std::string n : get_matching_children(m_broker, (ti_ptr->name + ".aliases"), all_alias)) {
                 std::string alias_name = ti_ptr->name + ".aliases." + n;
                 uint64_t address = gs::cci_get<uint64_t>(m_broker, alias_name + ".address");
                 uint64_t size = gs::cci_get<uint64_t>(m_broker, alias_name + ".size");
@@ -955,6 +1005,9 @@ private:
             }
             id_targets.push_back(ti_ptr); // Store shared_ptr in id_targets
         }
+
+        // Mark as initialized (release semantics ensures all writes are visible)
+        m_initialized.store(true, std::memory_order_release);
     }
 
     /// @brief CCI parameter to control lazy initialization.
@@ -980,10 +1033,11 @@ public:
     {
         SCP_DEBUG(()) << "router constructed";
 
-        target_socket.register_b_transport(this, &router::b_transport);
-        target_socket.register_transport_dbg(this, &router::transport_dbg);
-        target_socket.register_get_direct_mem_ptr(this, &router::get_direct_mem_ptr);
-        initiator_socket.register_invalidate_direct_mem_ptr(this, &router::invalidate_direct_mem_ptr);
+        target_socket.register_b_transport(this, &router<BUSWIDTH, CacheType>::b_transport);
+        target_socket.register_transport_dbg(this, &router<BUSWIDTH, CacheType>::transport_dbg);
+        target_socket.register_get_direct_mem_ptr(this, &router<BUSWIDTH, CacheType>::get_direct_mem_ptr);
+        initiator_socket.register_invalidate_direct_mem_ptr(this,
+                                                            &router<BUSWIDTH, CacheType>::invalidate_direct_mem_ptr);
         SCP_DEBUG(()) << "router Initializing DMI SCP reporting";
     }
 
@@ -1044,6 +1098,24 @@ public:
         (i.get_base_port())(target_socket.get_base_interface());
         (target_socket.get_base_port())(i.get_base_interface());
     }
+
+    /**
+     * @brief Get cache statistics (hits and misses).
+     *
+     * This method exposes the cache performance metrics for benchmarking and analysis.
+     *
+     * @param hits Output parameter for number of cache hits
+     * @param misses Output parameter for number of cache misses
+     */
+    void get_cache_stats(long long& hits, long long& misses) const { m_address_map.get_cache_stats(hits, misses); }
+
+    /**
+     * @brief Reset cache statistics to zero.
+     *
+     * This method should be called before each benchmark iteration to ensure
+     * accurate measurement of cache performance for that specific test.
+     */
+    void reset_cache_stats() { m_address_map.reset_cache_stats(); }
 };
 } // namespace gs
 

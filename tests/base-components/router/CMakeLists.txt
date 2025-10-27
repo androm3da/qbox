@@ -12,9 +12,10 @@ endmacro()
 gs_add_test(router-tests)
 gs_add_test(router-tests-extended)
 gs_add_test(router-addressmap-tests)
-gs_add_test(router-cache-bench)
+gs_add_test(router-cache-bench-enhanced)
 gs_add_test(router-advanced-overlap-tests)
 gs_add_test(router-shadowing-warning-test)
+gs_add_test(router-thread-safety-test)
 
 # For router-tests-new, enable death tests (ASSERT_EXIT)
 # This check is crucial because ASSERT_EXIT behaves differently based on GTEST_HAS_DEATH_TEST
