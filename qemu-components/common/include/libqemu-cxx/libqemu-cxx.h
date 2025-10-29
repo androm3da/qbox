@@ -469,7 +469,7 @@ public:
         IOMMUAccessFlags perm;
     };
 
-    std::unordered_map<uint64_t, qemu::IOMMUMemoryRegion::IOMMUTLBEntry> m_mapped_te;
+    std::map<uint64_t, qemu::IOMMUMemoryRegion::IOMMUTLBEntry> m_mapped_te;
 
     using IOMMUTranslateCallbackFn = std::function<void(IOMMUTLBEntry*, uint64_t, IOMMUAccessFlags, int)>;
     void init(const Object& owner, const char* name, uint64_t size, MemoryRegionOpsPtr ops,

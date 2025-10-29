@@ -143,6 +143,9 @@ public:
     enum StatusType { BUSY = 0, READY = 1, COMPLETE = 2 };
     enum CompleteType { FILL_DONE = 1, CHECK_DONE = 2 };
 
+    SCP_LOGGER();
+    SCP_LOGGER((TEST), "test");
+
     struct CPUState {
         RequestType current_request = NONE;
         StatusType status = BUSY;
@@ -185,8 +188,8 @@ public:
             m_available_regions.push(i);
         }
 
-        SCP_INFO(SCMOD) << "SMMU Tester Controller initialized: " << num_cpus << " CPUs, " << num_regions
-                        << " regions, target " << target_iterations << " iterations";
+        SCP_INFO((TEST)) << "SMMU Tester Controller initialized: " << num_cpus << " CPUs, " << num_regions
+                         << " regions, target " << target_iterations << " iterations";
     }
 
     void set_parent(class CpuArmCortexA53SMMUStressTestV2* parent) { m_parent = parent; }
@@ -240,11 +243,11 @@ private:
             break;
 
         case REG_DEBUG_DATA:
-            SCP_DEBUG(SCMOD) << "CPU " << cpu_id << " debug: 0x" << std::hex << data;
+            SCP_DEBUG(()) << "CPU " << cpu_id << " debug: 0x" << std::hex << data;
             break;
 
         default:
-            SCP_WARN(SCMOD) << "CPU " << cpu_id << " write to unknown register 0x" << std::hex << reg_offset;
+            SCP_FATAL(()) << "CPU " << cpu_id << " write to unknown register 0x" << std::hex << reg_offset;
             break;
         }
     }
@@ -271,7 +274,7 @@ private:
             break;
 
         default:
-            SCP_WARN(SCMOD) << "CPU " << cpu_id << " read from unknown register 0x" << std::hex << reg_offset;
+            SCP_FATAL(()) << "CPU " << cpu_id << " read from unknown register 0x" << std::hex << reg_offset;
             break;
         }
 
@@ -293,7 +296,7 @@ private:
     {
         CPUState& cpu = m_cpu_states[cpu_id];
 
-        SCP_INFO(SCMOD) << "CPU " << cpu_id << " request: " << (request == FILL_REQUEST ? "FILL" : "CHECK");
+        SCP_INFO(()) << "CPU " << cpu_id << " request: " << (request == FILL_REQUEST ? "FILL" : "CHECK");
 
         if (request == FILL_REQUEST) {
             if (!m_available_regions.empty()) {
@@ -304,18 +307,18 @@ private:
                 cpu.assigned_region = region;
                 cpu.is_working = true;
 
-                SCP_INFO(SCMOD) << "DEBUG: handle_request(FILL) assigning CPU " << cpu_id << " to region " << region
-                                << ". Calling configure_smmu_mapping()";
+                SCP_INFO(()) << "DEBUG: handle_request(FILL) assigning CPU " << cpu_id << " to region " << region
+                             << ". Calling configure_smmu_mapping()";
                 // Configure SMMU mapping for this CPU to this region
                 configure_smmu_mapping(cpu_id, region);
 
                 // Mark as ready
                 cpu.status = READY;
 
-                SCP_INFO(SCMOD) << "CPU " << cpu_id << " assigned region " << region << " for filling";
+                SCP_INFO((TEST)) << "CPU_" << cpu_id << " assigned region " << region << " for filling";
             } else {
                 cpu.status = BUSY; // No regions available
-                SCP_DEBUG(SCMOD) << "CPU " << cpu_id << " fill request - no regions available";
+                SCP_FATAL(()) << "CPU_" << cpu_id << " fill request - no regions available";
             }
         } else if (request == CHECK_REQUEST) {
             if (!m_regions_to_check.empty()) {
@@ -332,10 +335,10 @@ private:
                 // Mark as ready
                 cpu.status = READY;
 
-                SCP_INFO(SCMOD) << "CPU " << cpu_id << " assigned region " << region << " for checking";
+                SCP_INFO((TEST)) << "CPU_" << cpu_id << " assigned region " << region << " for checking";
             } else {
                 cpu.status = BUSY; // No regions to check
-                SCP_DEBUG(SCMOD) << "CPU " << cpu_id << " check request - no regions to check";
+                SCP_DEBUG(()) << "CPU_" << cpu_id << " check request - no regions to check";
             }
         }
     }
@@ -350,40 +353,40 @@ private:
 
         switch (msg_type) {
         case 0x1:
-            SCP_INFO(SCMOD) << "CPU " << cpu_id << " started up";
+            SCP_INFO(()) << "CPU " << cpu_id << " started up";
             break;
         case 0x2:
-            SCP_INFO(SCMOD) << "CPU " << cpu_id << " entering main loop, iteration " << msg_data;
+            SCP_INFO(()) << "CPU " << cpu_id << " entering main loop, iteration " << msg_data;
             break;
         case 0x3:
-            SCP_INFO(SCMOD) << "CPU " << cpu_id << " polling for readiness";
+            SCP_INFO(()) << "CPU " << cpu_id << " polling for readiness";
             break;
         case 0x4:
-            SCP_INFO(SCMOD) << "CPU " << cpu_id << " starting work on region " << msg_data;
+            SCP_INFO(()) << "CPU " << cpu_id << " starting work on region " << msg_data;
             break;
         case 0x5:
-            SCP_INFO(SCMOD) << "CPU " << cpu_id << " pattern verification success";
+            SCP_INFO(()) << "CPU " << cpu_id << " pattern verification success";
             break;
         case 0x6:
-            SCP_INFO(SCMOD) << "CPU " << cpu_id << " DEBUG: Starting fill for region " << msg_data;
+            SCP_INFO(()) << "CPU " << cpu_id << " DEBUG: Starting fill for region " << msg_data;
             break;
         case 0x7:
-            SCP_INFO(SCMOD) << "CPU " << cpu_id << " DEBUG: Fill write #" << msg_data << " (first 4 writes logged)";
+            SCP_INFO(()) << "CPU " << cpu_id << " DEBUG: Fill write #" << msg_data << " (first 4 writes logged)";
             break;
         case 0x8:
-            SCP_INFO(SCMOD) << "CPU " << cpu_id << " DEBUG: Completed fill for region " << msg_data;
+            SCP_INFO(()) << "CPU " << cpu_id << " DEBUG: Completed fill for region " << msg_data;
             break;
         case 0xD:
-            SCP_WARN(SCMOD) << "CPU " << cpu_id << " pattern verification FAILED";
+            SCP_WARN(()) << "CPU " << cpu_id << " pattern verification FAILED";
             break;
         case 0xE:
-            SCP_FATAL(SCMOD) << "🚨 DIAGNOSTIC ERROR: CPU " << cpu_id
-                             << " encountered fatal error - jumping to diagnostic handler at 0x200";
-            SCP_FATAL(SCMOD) << "This indicates a translation fault or other critical issue during CPU execution";
+            SCP_FATAL(()) << "🚨 DIAGNOSTIC ERROR: CPU " << cpu_id
+                          << " encountered fatal error - jumping to diagnostic handler at 0x200";
+            SCP_FATAL(()) << "This indicates a translation fault or other critical issue during CPU execution";
             sc_core::sc_stop();
             break;
         default:
-            SCP_DEBUG(SCMOD) << "CPU " << cpu_id << " debug: 0x" << std::hex << data;
+            SCP_DEBUG(()) << "CPU " << cpu_id << " debug: 0x" << std::hex << data;
             break;
         }
     }
@@ -450,6 +453,7 @@ class CpuArmCortexA53SMMUStressTestV2 : public TestBench, public CpuTesterCallba
 public:
     static constexpr uint16_t MAX_ITERATIONS = 0x7fff; // Limited to 16-bit for ARM64 movz instruction
     static constexpr uint64_t PATTERN_SIZE = 16;
+    static constexpr unsigned BOUNDARY_BYTES = 80;
     sc_core::sc_time TEST_DURATION = sc_core::sc_time(30, sc_core::SC_SEC);
 
     // Memory layout - REORGANIZED: Everything in first 1GB with 1:1 mapping
@@ -472,6 +476,8 @@ public:
     static constexpr uint64_t REGION_BASE = 0x10080000; // Test regions: 0x10080000+ in 4KB blocks (after page tables)
     static constexpr uint64_t REGION_SIZE = 0x1000;     // 4KB regions (one page each)
     static constexpr uint64_t PAGE_SIZE = 0x1000;       // 4KB pages
+
+    SCP_LOGGER();
 
 protected:
     struct PageTableAddresses {
@@ -579,7 +585,7 @@ protected:
         err = ks_open(KS_ARCH_ARM64, KS_MODE_LITTLE_ENDIAN, &ks);
 
         if (err != KS_ERR_OK) {
-            SCP_FATAL(SCMOD) << "Unable to initialize keystone";
+            SCP_FATAL(()) << "Unable to initialize keystone";
         }
 
         if (ks_asm(ks, assembly, addr, &fw, &size, &count) != KS_ERR_OK || size == 0) {
@@ -599,7 +605,7 @@ protected:
 public:
     CpuArmCortexA53SMMUStressTestV2(const sc_core::sc_module_name& n)
         : TestBench(n)
-        , p_num_cpu("num_cpu", 1, "Number of CPUs to instantiate in the test")
+        , p_num_cpu("num_cpu", 4, "Number of CPUs to instantiate in the test")
         , p_quantum_ns("quantum_ns", 1000000, "Value of the global TLM-2.0 quantum in ns")
         , m_inst_a("inst_a", &m_inst_manager, cpu_arm_cortexA53::ARCH)
         , m_inst_b("inst_b", &m_inst_manager, cpu_arm_cortexA53::ARCH)
@@ -630,9 +636,9 @@ public:
 
         m_num_regions = std::max(3u, static_cast<uint32_t>(p_num_cpu.get_value() * 3));
 
-        SCP_INFO(SCMOD) << "Creating SMMU Stress Test V2 with " << p_num_cpu.get_value() << " CPUs, " << m_num_regions
-                        << " regions";
-        SCP_INFO(SCMOD) << "NEW ARCHITECTURE: Tester-controlled SMMU configuration";
+        SCP_INFO(()) << "Creating SMMU Stress Test V2 with " << p_num_cpu.get_value() << " CPUs, " << m_num_regions
+                     << " regions";
+        SCP_INFO(()) << "NEW ARCHITECTURE: Tester-controlled SMMU configuration";
 
         // Configure SMMU
 
@@ -644,8 +650,8 @@ public:
         m_smmu.p_num_smr = 64;                       // Increased from 32 to support up to 32 CPUs (each needs 2 SMRs)
         m_smmu.p_num_pages = std::max(
             16u, static_cast<uint32_t>(p_num_cpu.get_value() * 2)); // Ensure enough pages for all CBs
-        SCP_INFO(SCMOD) << "SMMU500 instantiated: p_num_cb=" << m_smmu.p_num_cb << ", p_num_smr=" << m_smmu.p_num_smr
-                        << ", p_num_pages=" << m_smmu.p_num_pages;
+        SCP_INFO(()) << "SMMU500 instantiated: p_num_cb=" << m_smmu.p_num_cb << ", p_num_smr=" << m_smmu.p_num_smr
+                     << ", p_num_pages=" << m_smmu.p_num_pages;
 
         // Create TBU instances - 2 TBUs per CPU (identity + high VA)
         uint32_t num_cpus = p_num_cpu.get_value();
@@ -662,8 +668,7 @@ public:
             char pass_identity_name[32];
             std::snprintf(pass_identity_name, sizeof(pass_identity_name), "pass_identity_%d", i);
             m_pass_identity[i] = new gs::pass<>(pass_identity_name);
-            SCP_INFO(SCMOD) << "Identity pass-through constructed: CPU" << i
-                            << " (bypassing SMMU for identity traffic)";
+            SCP_INFO(()) << "Identity pass-through constructed: CPU" << i << " (bypassing SMMU for identity traffic)";
 #else
             // Identity TBU for each CPU - ALL share StreamID 0 → CB0
             char tbu_identity_name[32];
@@ -671,8 +676,8 @@ public:
             m_tbus_identity[i] = new gs::smmu500_tbu<>(tbu_identity_name, &m_smmu);
             m_tbus_identity[i]->p_topology_id = 0; // All identity TBUs share StreamID 0
             m_tbus_identity[i]->p_topology_id.set_value(0);
-            SCP_INFO(SCMOD) << "Identity TBU constructed: CPU" << i << " topology_id=0"
-                            << " (StreamID 0 → CB0 shared identity)";
+            SCP_INFO(()) << "Identity TBU constructed: CPU" << i << " topology_id=0"
+                         << " (StreamID 0 → CB0 shared identity)";
 #endif
 
             // High VA TBU for each CPU - unique StreamID per CPU
@@ -682,8 +687,8 @@ public:
             uint32_t high_va_topology_id = i + 1; // StreamID 1,2,3... for high VA
             m_tbus_high_va[i]->p_topology_id = high_va_topology_id;
             m_tbus_high_va[i]->p_topology_id.set_value(high_va_topology_id);
-            SCP_INFO(SCMOD) << "High VA TBU constructed: CPU" << i << " topology_id=" << high_va_topology_id
-                            << " (StreamID " << high_va_topology_id << " → CB" << high_va_topology_id << ")";
+            SCP_INFO(()) << "High VA TBU constructed: CPU" << i << " topology_id=" << high_va_topology_id
+                         << " (StreamID " << high_va_topology_id << " → CB" << high_va_topology_id << ")";
         }
 
         // Create per-CPU routers
@@ -692,7 +697,7 @@ public:
             char router_name[32];
             std::snprintf(router_name, sizeof(router_name), "cpu_router_%d", i);
             m_cpu_routers[i] = new gs::router<>(router_name);
-            SCP_INFO(SCMOD) << "Per-CPU router constructed: " << router_name;
+            SCP_INFO(()) << "Per-CPU router constructed: " << router_name;
         }
 
         // Initialize CPU to region mapping
@@ -718,20 +723,20 @@ public:
             // High VA traffic (>=0x300000000) -> High VA TBU
             m_cpu_routers[i]->add_target(m_tbus_high_va[i]->upstream_socket, 0x300000000ULL, 0x100000000ULL);
 
-            SCP_INFO(SCMOD) << "🔍 ROUTING DEBUG: CPU " << i << " -> CPU_Router_" << i;
+            SCP_INFO(()) << "🔍 ROUTING DEBUG: CPU " << i << " -> CPU_Router_" << i;
 #ifdef USE_PASS_FOR_IDENTITY
-            SCP_INFO(SCMOD) << "  - Identity range [0x0 - 0x10000000] -> Pass_Identity_" << i << " (bypassing SMMU)";
+            SCP_INFO(()) << "  - Identity range [0x0 - 0x10000000] -> Pass_Identity_" << i << " (bypassing SMMU)";
 #else
-            SCP_INFO(SCMOD) << "  - Identity range [0x0 - 0x10000000] -> Identity_TBU_" << i << " (StreamID 0)";
+            SCP_INFO(()) << "  - Identity range [0x0 - 0x10000000] -> Identity_TBU_" << i << " (StreamID 0)";
 #endif
-            SCP_INFO(SCMOD) << "  - High VA range [0x300000000 - 0x400000000] -> High_VA_TBU_" << i << " (StreamID "
-                            << (i + 1) << ")";
+            SCP_INFO(()) << "  - High VA range [0x300000000 - 0x400000000] -> High_VA_TBU_" << i << " (StreamID "
+                         << (i + 1) << ")";
 #ifdef USE_PASS_FOR_IDENTITY
-            SCP_INFO(SCMOD) << "  - Identity pass name: " << m_pass_identity[i]->name();
+            SCP_INFO(()) << "  - Identity pass name: " << m_pass_identity[i]->name();
 #else
-            SCP_INFO(SCMOD) << "  - Identity TBU name: " << m_tbus_identity[i]->name();
+            SCP_INFO(()) << "  - Identity TBU name: " << m_tbus_identity[i]->name();
 #endif
-            SCP_INFO(SCMOD) << "  - High VA TBU name: " << m_tbus_high_va[i]->name();
+            SCP_INFO(()) << "  - High VA TBU name: " << m_tbus_high_va[i]->name();
         }
 
         // Add components to global router
@@ -756,13 +761,13 @@ public:
         // Connect SMMU DMA socket
         m_global_router.add_initiator(m_smmu.dma_socket);
 
-        SCP_INFO(SCMOD) << "Memory layout:";
-        SCP_INFO(SCMOD) << "  FIRMWARE: 0x" << std::hex << MEM_ADDR;
-        SCP_INFO(SCMOD) << "  MAIN_MEM: 0x" << std::hex << MAIN_MEM_ADDR;
-        SCP_INFO(SCMOD) << "  REGIONS: 0x" << std::hex << REGION_BASE;
-        SCP_INFO(SCMOD) << "  SMMU_REG: 0x" << std::hex << SMMU_REG_ADDR;
-        SCP_INFO(SCMOD) << "  TESTER: 0x" << std::hex << TESTER_ADDR;
-        SCP_INFO(SCMOD) << "  VIRTUAL_TEST: 0x" << std::hex << VIRTUAL_TEST_ADDR;
+        SCP_INFO(()) << "Memory layout:";
+        SCP_INFO(()) << "  FIRMWARE: 0x" << std::hex << MEM_ADDR;
+        SCP_INFO(()) << "  MAIN_MEM: 0x" << std::hex << MAIN_MEM_ADDR;
+        SCP_INFO(()) << "  REGIONS: 0x" << std::hex << REGION_BASE;
+        SCP_INFO(()) << "  SMMU_REG: 0x" << std::hex << SMMU_REG_ADDR;
+        SCP_INFO(()) << "  TESTER: 0x" << std::hex << TESTER_ADDR;
+        SCP_INFO(()) << "  VIRTUAL_TEST: 0x" << std::hex << VIRTUAL_TEST_ADDR;
 
         generate_tester_controlled_firmware();
 
@@ -792,7 +797,7 @@ public:
     {
         wait(sc_core::sc_time(100, sc_core::SC_US));
 
-        SCP_INFO(SCMOD) << "Configuring SMMU for tester-controlled operation";
+        SCP_INFO(()) << "Configuring SMMU for tester-controlled operation";
 
         // First: clear CLIENTPD in SMMU_SCR0 (enable SMMU translation)
         write_smmu_register(SMMU_REG_ADDR + SMMU_SCR0_OFFSET, 0x0);
@@ -810,7 +815,7 @@ public:
         uint32_t s2cr0_value = (0x1 << 16) | (0 << 0); // TYPE=1, CBNDX=0
         write_smmu_register(s2cr0_addr, s2cr0_value);
 
-        SCP_INFO(SCMOD) << "SMR[0]/S2CR[0]: StreamID=0 -> CB0 (SHARED identity for ALL CPUs)";
+        SCP_INFO(()) << "SMR[0]/S2CR[0]: StreamID=0 -> CB0 (SHARED identity for ALL CPUs)";
 
         // Configure SMRs for high VA TBUs (one per CPU)
         for (uint32_t cpu = 0; cpu < p_num_cpu.get_value(); ++cpu) {
@@ -825,19 +830,19 @@ public:
             uint32_t s2cr_value = (0x1 << 16) | (high_va_cb << 0); // TYPE=1, CBNDX=cb
             write_smmu_register(s2cr_addr, s2cr_value);
 
-            SCP_INFO(SCMOD) << "SMR[" << high_va_stream_id << "]/S2CR[" << high_va_stream_id
-                            << "]: StreamID=" << high_va_stream_id << " -> CB" << high_va_cb << " (CPU " << cpu
-                            << " high VA)";
+            SCP_INFO(()) << "SMR[" << high_va_stream_id << "]/S2CR[" << high_va_stream_id
+                         << "]: StreamID=" << high_va_stream_id << " -> CB" << high_va_cb << " (CPU " << cpu
+                         << " high VA)";
         }
 
         // NEW ARCHITECTURE SUMMARY
-        SCP_INFO(SCMOD) << "SMMU StreamID Mapping Summary (NEW DUAL-TBU ARCHITECTURE):";
-        SCP_INFO(SCMOD) << "  StreamID 0 -> CB0 (SHARED identity for ALL CPUs - MMU disabled)";
+        SCP_INFO(()) << "SMMU StreamID Mapping Summary (NEW DUAL-TBU ARCHITECTURE):";
+        SCP_INFO(()) << "  StreamID 0 -> CB0 (SHARED identity for ALL CPUs - MMU disabled)";
         for (uint32_t cpu = 0; cpu < p_num_cpu.get_value(); ++cpu) {
-            SCP_INFO(SCMOD) << "  StreamID " << (cpu + 1) << " -> CB" << (cpu + 1) << " (CPU " << cpu
-                            << " high VA - 4KB pages)";
+            SCP_INFO(()) << "  StreamID " << (cpu + 1) << " -> CB" << (cpu + 1) << " (CPU " << cpu
+                         << " high VA - 4KB pages)";
         }
-        SCP_INFO(SCMOD) << "ARCHITECTURE: Shared identity CB0 + per-CPU high VA CBs!";
+        SCP_INFO(()) << "ARCHITECTURE: Shared identity CB0 + per-CPU high VA CBs!";
 
         // Initialize context banks for NEW DUAL-TBU ARCHITECTURE
         // CB0: SHARED identity context bank for ALL CPUs
@@ -851,12 +856,12 @@ public:
             // This replaces both setup_high_va_context_bank() and setup_complete_page_table_structure()
             setup_complete_high_va_context_bank(cpu, high_va_cb);
 
-            SCP_INFO(SCMOD) << "Complete high VA context bank initialized for CPU " << cpu << " (CB" << high_va_cb
-                            << ") - conflicts resolved";
+            SCP_INFO(()) << "Complete high VA context bank initialized for CPU " << cpu << " (CB" << high_va_cb
+                         << ") - conflicts resolved";
         }
 
-        SCP_INFO(SCMOD) << "SMMU configuration completed - ready for tester control";
-        SCP_INFO(SCMOD) << "✅ CRITICAL FIX APPLIED: All CPUs now have complete page table structures";
+        SCP_INFO(()) << "SMMU configuration completed - ready for tester control";
+        SCP_INFO(()) << "✅ CRITICAL FIX APPLIED: All CPUs now have complete page table structures";
     }
 
     void setup_identity_context_bank(uint32_t cpu)
@@ -884,8 +889,8 @@ public:
         write_smmu_register(cb_base + CB_MAIR0_OFFSET, 0xFF);
         write_smmu_register(cb_base + CB_MAIR1_OFFSET, 0x0);
 
-        SCP_INFO(SCMOD) << "Identity context bank CB" << cb << " set up for CPU " << cpu
-                        << " with MMU DISABLED (pure identity mapping VA=PA)";
+        SCP_INFO(()) << "Identity context bank CB" << cb << " set up for CPU " << cpu
+                     << " with MMU DISABLED (pure identity mapping VA=PA)";
     }
 
     /**
@@ -918,8 +923,8 @@ public:
         // This combines setup_high_va_context_bank() and setup_complete_page_table_structure()
         // to eliminate the conflicts that cause "bad descriptor" SMMU faults
 
-        SCP_INFO(SCMOD) << "🔧 CONSOLIDATED SETUP: Setting up complete high VA context bank for CPU " << cpu << " (CB"
-                        << cb << ") - resolving function conflicts";
+        SCP_INFO(()) << "🔧 CONSOLIDATED SETUP: Setting up complete high VA context bank for CPU " << cpu << " (CB"
+                     << cb << ") - resolving function conflicts";
 
         // Use consistent page table addressing throughout
         const auto pt_addrs = get_page_table_addresses_for_cpu(cpu);
@@ -929,11 +934,11 @@ public:
         uint64_t l2_table_addr = pt_addrs.l2;
         uint64_t l3_table_addr = pt_addrs.l3;
 
-        SCP_INFO(SCMOD) << "  - Page table base: 0x" << std::hex << l0_table_addr;
-        SCP_INFO(SCMOD) << "  - L0 table: 0x" << std::hex << l0_table_addr;
-        SCP_INFO(SCMOD) << "  - L1 table: 0x" << std::hex << l1_table_addr;
-        SCP_INFO(SCMOD) << "  - L2 table: 0x" << std::hex << l2_table_addr;
-        SCP_INFO(SCMOD) << "  - L3 table: 0x" << std::hex << l3_table_addr;
+        SCP_INFO(()) << "  - Page table base: 0x" << std::hex << l0_table_addr;
+        SCP_INFO(()) << "  - L0 table: 0x" << std::hex << l0_table_addr;
+        SCP_INFO(()) << "  - L1 table: 0x" << std::hex << l1_table_addr;
+        SCP_INFO(()) << "  - L2 table: 0x" << std::hex << l2_table_addr;
+        SCP_INFO(()) << "  - L3 table: 0x" << std::hex << l3_table_addr;
 
         // Set up complete page table structure
         // L0[0]: 0x00000000 - 0x7FFFFFFFFF (0-512GB) -> L1 table
@@ -948,7 +953,7 @@ public:
         uint64_t l1_desc_0 = (l2_table_addr & ~0xFFFULL) | (1ULL << 10) | 0x3ULL;
         write_memory_64(l1_table_addr + (0 * 8), l1_desc_0);
 
-        SCP_INFO(SCMOD) << "  - L1[0]: VA=0x0 (TBU-stripped from 0x300000000) -> L2 table (same as high VA)";
+        SCP_INFO(()) << "  - L1[0]: VA=0x0 (TBU-stripped from 0x300000000) -> L2 table (same as high VA)";
 
         // L1[12]: VIRTUAL_TEST_ADDR range -> L2 table (for high VA mapping)
         uint32_t l1_index = (VIRTUAL_TEST_ADDR >> 30) & 0x1FF;
@@ -970,21 +975,21 @@ public:
         // CRITICAL DEBUG: Verify the L3[0] descriptor was written to the correct L3 table address
         uint64_t l3_readback = m_memory_accessor.read_memory(l3_table_addr + (0 * 8));
 
-        SCP_INFO(SCMOD) << "  - L3[0]: VA=0x0 -> PA=0x" << std::hex << default_physical_addr << " (CPU " << cpu
-                        << " specific default mapping)";
-        SCP_INFO(SCMOD) << "  - L3 table address: 0x" << std::hex << l3_table_addr;
-        SCP_INFO(SCMOD) << "  - L3[0] descriptor written: 0x" << std::hex << l3_desc_0;
-        SCP_INFO(SCMOD) << "  - L3[0] descriptor readback: 0x" << std::hex << l3_readback;
-        SCP_INFO(SCMOD) << "  - Writing L3[0] to address: 0x" << std::hex << (l3_table_addr + (0 * 8));
+        SCP_INFO(()) << "  - L3[0]: VA=0x0 -> PA=0x" << std::hex << default_physical_addr << " (CPU " << cpu
+                     << " specific default mapping)";
+        SCP_INFO(()) << "  - L3 table address: 0x" << std::hex << l3_table_addr;
+        SCP_INFO(()) << "  - L3[0] descriptor written: 0x" << std::hex << l3_desc_0;
+        SCP_INFO(()) << "  - L3[0] descriptor readback: 0x" << std::hex << l3_readback;
+        SCP_INFO(()) << "  - Writing L3[0] to address: 0x" << std::hex << (l3_table_addr + (0 * 8));
 
         if (l3_readback != l3_desc_0) {
-            SCP_FATAL(SCMOD) << "🚨 CRITICAL: L3[0] descriptor write/read mismatch for CPU " << cpu << "!";
-            SCP_FATAL(SCMOD) << "  Expected: 0x" << std::hex << l3_desc_0;
-            SCP_FATAL(SCMOD) << "  Got: 0x" << std::hex << l3_readback;
-            SCP_FATAL(SCMOD) << "  L3 table address: 0x" << std::hex << l3_table_addr;
-            SCP_FATAL(SCMOD) << "  Write address: 0x" << std::hex << (l3_table_addr + (0 * 8));
+            SCP_FATAL(()) << "🚨 CRITICAL: L3[0] descriptor write/read mismatch for CPU " << cpu << "!";
+            SCP_FATAL(()) << "  Expected: 0x" << std::hex << l3_desc_0;
+            SCP_FATAL(()) << "  Got: 0x" << std::hex << l3_readback;
+            SCP_FATAL(()) << "  L3 table address: 0x" << std::hex << l3_table_addr;
+            SCP_FATAL(()) << "  Write address: 0x" << std::hex << (l3_table_addr + (0 * 8));
         } else {
-            SCP_INFO(SCMOD) << "✅ L3[0] descriptor verification successful for CPU " << cpu;
+            SCP_INFO(()) << "✅ L3[0] descriptor verification successful for CPU " << cpu;
         }
 
         // Configure context bank registers
@@ -998,8 +1003,8 @@ public:
         write_smmu_register(cb_base + CB_TTBR0_LOW_OFFSET, static_cast<uint32_t>(l0_table_addr & 0xFFFFFFFF));
         write_smmu_register(cb_base + CB_TTBR0_HIGH_OFFSET, static_cast<uint32_t>((l0_table_addr >> 32) & 0xFFFFFFFF));
 
-        SCP_INFO(SCMOD) << "  - TTBR0 SET: CB" << cb << " TTBR0=0x" << std::hex << l0_table_addr;
-        SCP_INFO(SCMOD) << "  - Expected L3 table at: 0x" << std::hex << (l0_table_addr + (PAGE_SIZE * 3));
+        SCP_INFO(()) << "  - TTBR0 SET: CB" << cb << " TTBR0=0x" << std::hex << l0_table_addr;
+        SCP_INFO(()) << "  - Expected L3 table at: 0x" << std::hex << (l0_table_addr + (PAGE_SIZE * 3));
 
         // Configure TCR for 4KB pages, 48-bit VA space
         write_smmu_register(cb_base + CB_TCR_OFFSET,
@@ -1013,12 +1018,11 @@ public:
         uint32_t sctlr_value = (1 << 0) | (1 << 2) | (1 << 4); // M, A, C bits enabled
         write_smmu_register(cb_base + CB_SCTLR_OFFSET, sctlr_value);
 
-        SCP_INFO(SCMOD) << "✅ CONSOLIDATED SETUP COMPLETE: CPU " << cpu << " CB" << cb;
-        SCP_INFO(SCMOD) << "  - Page tables initialized with consistent addressing";
-        SCP_INFO(SCMOD) << "  - Context bank configured once with MMU enabled";
-        SCP_INFO(SCMOD) << "  - Function conflicts resolved - no duplicate configuration";
-        SCP_INFO(SCMOD) << "  - L0[0] -> L1 table, L1[0]: Identity mapping, L1[" << std::dec << l1_index
-                        << "] -> High VA";
+        SCP_INFO(()) << "✅ CONSOLIDATED SETUP COMPLETE: CPU " << cpu << " CB" << cb;
+        SCP_INFO(()) << "  - Page tables initialized with consistent addressing";
+        SCP_INFO(()) << "  - Context bank configured once with MMU enabled";
+        SCP_INFO(()) << "  - Function conflicts resolved - no duplicate configuration";
+        SCP_INFO(()) << "  - L0[0] -> L1 table, L1[0]: Identity mapping, L1[" << std::dec << l1_index << "] -> High VA";
     }
 
     void map_cpu_to_region(uint32_t cpu, uint32_t region)
@@ -1035,7 +1039,7 @@ public:
         uint64_t physical_addr = REGION_BASE + (region * REGION_SIZE);
         const auto pt_addrs = get_page_table_addresses_for_cpu(cpu);
 
-        SCP_INFO(SCMOD) << "Starting map_cpu_to_region for CPU " << cpu << " -> Region " << region;
+        SCP_INFO(()) << "Starting map_cpu_to_region for CPU " << cpu << " -> Region " << region;
 
         // Step 1: Update page tables
         create_page_table_mapping(cpu, VIRTUAL_TEST_ADDR, physical_addr, REGION_SIZE);
@@ -1043,7 +1047,7 @@ public:
         // Step 2: Reconfigure the context bank to use the updated page tables
         reconfigure_context_bank(high_va_cb, pt_addrs.l0);
 
-        SCP_INFO(SCMOD) << "✅ SMMU mapping completed successfully for CPU " << cpu << " -> Region " << region;
+        SCP_INFO(()) << "✅ SMMU mapping completed successfully for CPU " << cpu << " -> Region " << region;
     }
 
     void create_page_table_mapping(uint32_t cpu, uint64_t virtual_addr, uint64_t physical_addr, uint64_t size)
@@ -1066,12 +1070,12 @@ public:
         uint64_t l2_table_addr = pt_addrs.l2;
         uint64_t l3_table_addr = pt_addrs.l3;
 
-        SCP_INFO(SCMOD) << "🔍 CRITICAL FIX: Creating HIGH VA page tables for CPU " << cpu;
-        SCP_INFO(SCMOD) << "  - High VA CB page table offset: 0x" << std::hex << (pt_addrs.l0 - PAGE_TABLE_BASE);
-        SCP_INFO(SCMOD) << "  - L0 table: 0x" << std::hex << l0_table_addr;
-        SCP_INFO(SCMOD) << "  - L1 table: 0x" << std::hex << l1_table_addr;
-        SCP_INFO(SCMOD) << "  - L2 table: 0x" << std::hex << l2_table_addr;
-        SCP_INFO(SCMOD) << "  - L3 table: 0x" << std::hex << l3_table_addr;
+        SCP_INFO(()) << "🔍 CRITICAL FIX: Creating HIGH VA page tables for CPU " << cpu;
+        SCP_INFO(()) << "  - High VA CB page table offset: 0x" << std::hex << (pt_addrs.l0 - PAGE_TABLE_BASE);
+        SCP_INFO(()) << "  - L0 table: 0x" << std::hex << l0_table_addr;
+        SCP_INFO(()) << "  - L1 table: 0x" << std::hex << l1_table_addr;
+        SCP_INFO(()) << "  - L2 table: 0x" << std::hex << l2_table_addr;
+        SCP_INFO(()) << "  - L3 table: 0x" << std::hex << l3_table_addr;
 
         // OPTIMIZED: Only update L3[0] entry - page table structure already exists from setup
         // The complete L0→L1→L2→L3 structure was created in setup_complete_high_va_context_bank()
@@ -1087,19 +1091,19 @@ public:
         uint64_t l3_readback = m_memory_accessor.read_memory(l3_table_addr + (0 * 8));
         uint64_t extracted_physical = l3_readback & ~0xFFFULL;
 
-        SCP_INFO(SCMOD) << "✅ OPTIMIZED page table update for CPU " << cpu << ":";
-        SCP_INFO(SCMOD) << "  - L3[0]: VA=0x0 -> PA=0x" << std::hex << physical_addr << " (region "
-                        << ((physical_addr - REGION_BASE) / REGION_SIZE) << ")";
-        SCP_INFO(SCMOD) << "  - L3[0] descriptor: 0x" << std::hex << l3_desc_0;
-        SCP_INFO(SCMOD) << "  - L3[0] readback: 0x" << std::hex << l3_readback;
-        SCP_INFO(SCMOD) << "  - Extracted physical: 0x" << std::hex << extracted_physical;
+        SCP_INFO(()) << "✅ OPTIMIZED page table update for CPU " << cpu << ":";
+        SCP_INFO(()) << "  - L3[0]: VA=0x0 -> PA=0x" << std::hex << physical_addr << " (region "
+                     << ((physical_addr - REGION_BASE) / REGION_SIZE) << ")";
+        SCP_INFO(()) << "  - L3[0] descriptor: 0x" << std::hex << l3_desc_0;
+        SCP_INFO(()) << "  - L3[0] readback: 0x" << std::hex << l3_readback;
+        SCP_INFO(()) << "  - Extracted physical: 0x" << std::hex << extracted_physical;
 
         if (extracted_physical != physical_addr) {
-            SCP_FATAL(SCMOD) << "🚨 CRITICAL: L3[0] physical address mismatch!";
-            SCP_FATAL(SCMOD) << "  Expected: 0x" << std::hex << physical_addr;
-            SCP_FATAL(SCMOD) << "  Found: 0x" << std::hex << extracted_physical;
+            SCP_FATAL(()) << "🚨 CRITICAL: L3[0] physical address mismatch!";
+            SCP_FATAL(()) << "  Expected: 0x" << std::hex << physical_addr;
+            SCP_FATAL(()) << "  Found: 0x" << std::hex << extracted_physical;
         } else {
-            SCP_INFO(SCMOD) << "✅ L3[0] physical address verification successful";
+            SCP_INFO(()) << "✅ L3[0] physical address verification successful";
         }
 
         // CRITICAL FIX: Invalidate SMMU TLB after page table update
@@ -1126,13 +1130,13 @@ public:
 
         // Safety check to prevent unmapping of the shared identity context bank
         if (high_va_cb == 0) {
-            SCP_FATAL(SCMOD) << "CRITICAL BUG: Attempt to unmap shared CB0 for CPU " << cpu;
+            SCP_FATAL(()) << "CRITICAL BUG: Attempt to unmap shared CB0 for CPU " << cpu;
             return;
         }
 
         uint32_t cb_base = get_context_bank_base(high_va_cb);
 
-        SCP_INFO(SCMOD) << "Unmapping CPU " << cpu << " from CB" << high_va_cb;
+        SCP_INFO(()) << "Unmapping CPU " << cpu << " from CB" << high_va_cb;
 
         // Disable the MMU for the high VA context bank
         write_smmu_register(cb_base + CB_SCTLR_OFFSET, 0x0);
@@ -1141,13 +1145,13 @@ public:
         write_smmu_register(cb_base + CB_TTBR0_LOW_OFFSET, 0x0);
         write_smmu_register(cb_base + CB_TTBR0_HIGH_OFFSET, 0x0);
 
-        SCP_INFO(SCMOD) << "Unmap complete for CPU " << cpu << ", high VA CB" << high_va_cb << " disabled.";
+        SCP_INFO(()) << "Unmap complete for CPU " << cpu << ", high VA CB" << high_va_cb << " disabled.";
         m_cpu_to_region[cpu] = 0xFFFFFFFF;
     }
 
     void generate_tester_controlled_firmware()
     {
-        SCP_INFO(SCMOD) << "Generating tester-controlled firmware with proper layout";
+        SCP_INFO(()) << "Generating tester-controlled firmware with proper layout";
 
         // 1. BOOT LOADER at 0x0 - Just jumps to main firmware
         static constexpr const char* BOOT_LOADER = R"(
@@ -1254,7 +1258,8 @@ public:
 
                 // Fill the region at virtual address
                 ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR
-                mov x4, #8                    // Words to write at each boundary
+                mov x4, #%u                   // Boundary bytes to write at each boundary
+                lsr x4, x4, #3                // Convert bytes to 8-byte words
                 mov x5, #0                    // Offset counter
                 
             fill_loop_start:
@@ -1288,8 +1293,8 @@ public:
                 orr x24, x24, x22
 
                 // Write at the end of the block
-                mov x6, #4096
-                sub x6, x6, #64
+                mov x6, #%u
+                sub x6, x6, x4, lsl #3
                 add x6, x3, x6
                 lsl x7, x5, #3
                 add x6, x6, x7
@@ -1326,7 +1331,8 @@ public:
                 // Verify region pattern
                 ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR
                 mov x5, #0
-                mov x6, #8
+                mov x6, #%u                   // Boundary bytes to verify
+                lsr x6, x6, #3                // Convert to 8-byte words
             verify_loop_start:
                 cmp x5, x6
                 b.ge verify_loop_end
@@ -1349,8 +1355,8 @@ public:
                 cmp x5, x6
                 b.ge verify_success
 
-                mov x7, #4096
-                sub x7, x7, #64
+                mov x7, #%u
+                sub x7, x7, x6, lsl #3
                 add x7, x3, x7
                 lsl x8, x5, #3
                 add x7, x7, x8
@@ -1367,7 +1373,8 @@ public:
             verify_success:
                 // Clear region
                 ldr x3, =0x%016)" PRIx64 R"(
-                mov x4, #8
+                mov x4, #%u                   // Boundary bytes to clear
+                lsr x4, x4, #3                // Convert bytes to 8-byte words
                 mov x7, #0
                 mov x5, #0
             clear_loop_start:
@@ -1387,8 +1394,8 @@ public:
                 cmp x5, x4
                 b.ge clear_done
 
-                mov x8, #4096
-                sub x8, x8, #64
+                mov x8, #%u
+                sub x8, x8, x4, lsl #3
                 add x8, x3, x8
                 lsl x9, x5, #3
                 add x8, x8, x9
@@ -1420,35 +1427,38 @@ public:
 
         char main_buf[8192];
         std::snprintf(main_buf, sizeof(main_buf), MAIN_FIRMWARE,
-                      TESTER_ADDR,       // Parameter 1: TESTER_ADDR
-                      MAX_ITERATIONS,    // Parameter 2: MAX_ITERATIONS
-                      VIRTUAL_TEST_ADDR, // Parameter 3: VIRTUAL_TEST_ADDR (fill)
-                      VIRTUAL_TEST_ADDR, // Parameter 4: VIRTUAL_TEST_ADDR (verify)
-                      VIRTUAL_TEST_ADDR, // Parameter 5: VIRTUAL_TEST_ADDR (clear)
-                      PATTERN_SIZE,      // Parameter 6: PATTERN_SIZE (clear)
-                      VIRTUAL_TEST_ADDR, // Parameter 7: VIRTUAL_TEST_ADDR (clear)
-                      PATTERN_SIZE);     // Parameter 8: PATTERN_SIZE (clear)
+                      TESTER_ADDR,                           // %1: TESTER_ADDR
+                      MAX_ITERATIONS,                        // %2: MAX_ITERATIONS
+                      VIRTUAL_TEST_ADDR,                     // %3: VIRTUAL_TEST_ADDR (fill)
+                      static_cast<unsigned>(BOUNDARY_BYTES), // %4: boundary bytes (fill)
+                      static_cast<unsigned>(PAGE_SIZE),      // %5: page size
+                      VIRTUAL_TEST_ADDR,                     // %6: VIRTUAL_TEST_ADDR (verify)
+                      static_cast<unsigned>(BOUNDARY_BYTES), // %7: boundary bytes (verify)
+                      static_cast<unsigned>(PAGE_SIZE),      // %8: page size
+                      VIRTUAL_TEST_ADDR,                     // %9: VIRTUAL_TEST_ADDR (clear)
+                      static_cast<unsigned>(BOUNDARY_BYTES), // %10: boundary bytes (clear)
+                      static_cast<unsigned>(PAGE_SIZE));     // %11: page size
 
         set_firmware(main_buf, MAIN_FIRMWARE_ADDR);
 
-        SCP_INFO(SCMOD) << "Firmware layout completed:";
-        SCP_INFO(SCMOD) << "  - Boot loader at 0x" << std::hex << BOOT_ADDR;
-        SCP_INFO(SCMOD) << "  - Diagnostic handler at 0x" << std::hex << DIAGNOSTIC_ADDR;
-        SCP_INFO(SCMOD) << "  - Main firmware at 0x" << std::hex << MAIN_FIRMWARE_ADDR;
+        SCP_INFO(()) << "Firmware layout completed:";
+        SCP_INFO(()) << "  - Boot loader at 0x" << std::hex << BOOT_ADDR;
+        SCP_INFO(()) << "  - Diagnostic handler at 0x" << std::hex << DIAGNOSTIC_ADDR;
+        SCP_INFO(()) << "  - Main firmware at 0x" << std::hex << MAIN_FIRMWARE_ADDR;
     }
 
     void write_smmu_register(uint32_t addr, uint32_t value)
     {
-        SCP_INFO(SCMOD) << "ATTEMPTING SMMU WRITE: addr=0x" << std::hex << addr << ", value=0x" << value;
+        SCP_INFO(()) << "ATTEMPTING SMMU WRITE: addr=0x" << std::hex << addr << ", value=0x" << value;
         m_memory_accessor.write_register(addr, value);
-        SCP_INFO(SCMOD) << "SMMU WRITE COMPLETED: addr=0x" << std::hex << addr << ", value=0x" << value;
+        SCP_INFO(()) << "SMMU WRITE COMPLETED: addr=0x" << std::hex << addr << ", value=0x" << value;
     }
 
     uint32_t read_smmu_register(uint32_t addr)
     {
-        SCP_INFO(SCMOD) << "ATTEMPTING SMMU READ: addr=0x" << std::hex << addr;
+        SCP_INFO(()) << "ATTEMPTING SMMU READ: addr=0x" << std::hex << addr;
         uint32_t value = m_memory_accessor.read_register(addr);
-        SCP_INFO(SCMOD) << "SMMU READ COMPLETED: addr=0x" << std::hex << addr << ", value=0x" << value;
+        SCP_INFO(()) << "SMMU READ COMPLETED: addr=0x" << std::hex << addr << ", value=0x" << value;
         return value;
     }
 
@@ -1472,8 +1482,8 @@ public:
         uint32_t high_va_cb = cpu + 1; // CB1 for CPU0, CB2 for CPU1
         uint32_t cb_base = get_context_bank_base(high_va_cb);
 
-        SCP_INFO(SCMOD) << "🔄 TLB INVALIDATION: Invalidating SMMU TLB for CPU " << cpu << " (CB" << high_va_cb
-                        << ") - interrupts disabled during setup";
+        SCP_INFO(()) << "🔄 TLB INVALIDATION: Invalidating SMMU TLB for CPU " << cpu << " (CB" << high_va_cb
+                     << ") - interrupts disabled during setup";
 
         // Method 1: Write to TLBIALL register to invalidate all TLB entries for this context bank
         // TLBIALL is per-CB and only affects this specific context bank
@@ -1484,7 +1494,7 @@ public:
         // Add delay to ensure TLB invalidation takes effect
         wait(sc_core::sc_time(2, sc_core::SC_US));
 
-        SCP_INFO(SCMOD) << "✅ TLB INVALIDATION COMPLETE: CPU " << cpu << " TLB cleared";
+        SCP_INFO(()) << "✅ TLB INVALIDATION COMPLETE: CPU " << cpu << " TLB cleared";
     }
 
     // CpuTesterCallbackIface implementation (not used in V2)
@@ -1496,12 +1506,12 @@ public:
 
     virtual void end_of_simulation() override
     {
-        SCP_INFO(SCMOD) << "SMMU Stress Test V2 completed";
-        SCP_INFO(SCMOD) << "Final statistics:";
-        SCP_INFO(SCMOD) << "  - Total iterations: " << m_tester_controller.m_global_iterations << "/" << MAX_ITERATIONS;
-        SCP_INFO(SCMOD) << "  - CPUs: " << p_num_cpu.get_value();
-        SCP_INFO(SCMOD) << "  - Memory regions: " << m_num_regions;
-        SCP_INFO(SCMOD) << "  - Pattern size: " << PATTERN_SIZE << " * 8 bytes";
+        SCP_INFO(()) << "SMMU Stress Test V2 completed";
+        SCP_INFO(()) << "Final statistics:";
+        SCP_INFO(()) << "  - Total iterations: " << m_tester_controller.m_global_iterations << "/" << MAX_ITERATIONS;
+        SCP_INFO(()) << "  - CPUs: " << p_num_cpu.get_value();
+        SCP_INFO(()) << "  - Memory regions: " << m_num_regions;
+        SCP_INFO(()) << "  - Pattern size: " << PATTERN_SIZE << " * 8 bytes";
     }
 };
 
@@ -1510,37 +1520,37 @@ void CpuArmCortexA53SMMUStressTestV2::reconfigure_context_bank(uint32_t cb, uint
     uint32_t cb_base = get_context_bank_base(cb);
 
     // First disable MMU to safely reconfigure
-    SCP_INFO(SCMOD) << "  - Step 1: Disabling MMU for safe reconfiguration";
-    write_smmu_register(cb_base + CB_SCTLR_OFFSET, 0x0);
+    SCP_INFO(()) << "  - Step 1: Disabling MMU for safe reconfiguration";
+    //    write_smmu_register(cb_base + CB_SCTLR_OFFSET, 0x0);
 
     // Add delay after MMU disable
-    wait(sc_core::sc_time(1, sc_core::SC_US));
+    // wait(sc_core::sc_time(1, sc_core::SC_US));
 
     // Configure TTBR0 with page table address
-    SCP_INFO(SCMOD) << "  - Step 2: Configuring TTBR0 with page table address 0x" << std::hex << page_table_addr;
+    SCP_INFO(()) << "  - Step 2: Configuring TTBR0 with page table address 0x" << std::hex << page_table_addr;
     write_smmu_register(cb_base + CB_TTBR0_LOW_OFFSET, static_cast<uint32_t>(page_table_addr & 0xFFFFFFFF));
     write_smmu_register(cb_base + CB_TTBR0_HIGH_OFFSET, static_cast<uint32_t>((page_table_addr >> 32) & 0xFFFFFFFF));
 
     // Configure TCR for 4KB pages, 48-bit VA space
-    SCP_INFO(SCMOD) << "  - Step 3: Configuring TCR for 4KB pages";
+    SCP_INFO(()) << "  - Step 3: Configuring TCR for 4KB pages";
     uint32_t tcr_value = (1U << 31) | (16 << 0) | (0 << 14) | (3 << 12) | (1 << 10) | (1 << 8);
     write_smmu_register(cb_base + CB_TCR_OFFSET, tcr_value);
 
     // Configure MAIR for normal memory
-    SCP_INFO(SCMOD) << "  - Step 4: Configuring MAIR";
+    SCP_INFO(()) << "  - Step 4: Configuring MAIR";
     write_smmu_register(cb_base + CB_MAIR0_OFFSET, 0xFF); // Normal memory, write-back cacheable
     write_smmu_register(cb_base + CB_MAIR1_OFFSET, 0x0);
 
     // Add delay before enabling MMU
-    wait(sc_core::sc_time(2, sc_core::SC_US));
+    // wait(sc_core::sc_time(2, sc_core::SC_US));
 
     // Enable MMU with proper configuration - CRITICAL: M bit must be set for translation
     uint32_t sctlr_value = (1 << 0) | (1 << 2) | (1 << 4);
-    SCP_INFO(SCMOD) << "  - Step 5: Enabling MMU with SCTLR: 0x" << std::hex << sctlr_value;
+    SCP_INFO(()) << "  - Step 5: Enabling MMU with SCTLR: 0x" << std::hex << sctlr_value;
     write_smmu_register(cb_base + CB_SCTLR_OFFSET, sctlr_value);
 
     // Additional delay to ensure MMU enable takes effect
-    wait(sc_core::sc_time(3, sc_core::SC_US));
+    //    wait(sc_core::sc_time(3, sc_core::SC_US));
 }
 
 // Implement the tester controller methods that need access to parent
@@ -1562,14 +1572,14 @@ void SMMUTesterController::unmap_cpu_region(uint32_t cpu_id)
 bool SMMUTesterController::verify_region_pattern(uint32_t cpu_id, uint32_t region_id)
 {
     if (!m_parent) {
-        SCP_FATAL(SCMOD) << "No parent reference for memory access";
+        SCP_FATAL(()) << "No parent reference for memory access";
         return false;
     }
 
     uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
                              (region_id * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
 
-    SCP_INFO(SCMOD) << "Verifying region " << region_id << " at physical address 0x" << std::hex << physical_addr;
+    SCP_INFO(()) << "Verifying region " << region_id << " at physical address 0x" << std::hex << physical_addr;
 
     const uint32_t words_to_check = 8;
     // Check the beginning of the block
@@ -1581,7 +1591,7 @@ bool SMMUTesterController::verify_region_pattern(uint32_t cpu_id, uint32_t regio
         uint32_t pattern_region_id = (read_value >> 16) & 0xFFFF;
 
         if (pattern_region_id != region_id || pattern_cpu_id != cpu_id) {
-            SCP_FATAL(SCMOD) << "Pattern mismatch in region " << region_id << " at beginning offset " << i;
+            SCP_FATAL(()) << "Pattern mismatch in region " << region_id << " at beginning offset " << i;
             return false;
         }
     }
@@ -1596,26 +1606,26 @@ bool SMMUTesterController::verify_region_pattern(uint32_t cpu_id, uint32_t regio
         uint32_t pattern_region_id = (read_value >> 16) & 0xFFFF;
 
         if (pattern_region_id != region_id || pattern_cpu_id != cpu_id) {
-            SCP_FATAL(SCMOD) << "Pattern mismatch in region " << region_id << " at end offset " << i;
+            SCP_FATAL(()) << "Pattern mismatch in region " << region_id << " at end offset " << i;
             return false;
         }
     }
 
-    SCP_INFO(SCMOD) << "Region " << region_id << " verification successful";
+    SCP_INFO(()) << "Region " << region_id << " verification successful";
     return true;
 }
 
 void SMMUTesterController::clear_region_pattern(uint32_t region_id)
 {
     if (!m_parent) {
-        SCP_FATAL(SCMOD) << "No parent reference for memory access";
+        SCP_FATAL(()) << "No parent reference for memory access";
         return;
     }
 
     uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
                              (region_id * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
 
-    SCP_INFO(SCMOD) << "Clearing region " << region_id << " at physical address 0x" << std::hex << physical_addr;
+    SCP_INFO(()) << "Clearing region " << region_id << " at physical address 0x" << std::hex << physical_addr;
 
     const uint32_t words_to_clear = 8;
     // Clear the beginning of the block
@@ -1629,7 +1639,7 @@ void SMMUTesterController::clear_region_pattern(uint32_t region_id)
             physical_addr + CpuArmCortexA53SMMUStressTestV2::REGION_SIZE - (words_to_clear * 8) + (i * 8), 0);
     }
 
-    SCP_INFO(SCMOD) << "Region " << region_id << " cleared";
+    SCP_INFO(()) << "Region " << region_id << " cleared";
 }
 
 /* ---- Implementation moved here to ensure CpuArmCortexA53SMMUStressTestV2 is a complete type ---- */
@@ -1650,13 +1660,12 @@ void SMMUTesterController::handle_complete(uint32_t cpu_id, CompleteType complet
 
     if (complete == FILL_DONE) {
         if (cpu.assigned_region >= m_num_regions) {
-            SCP_FATAL(SCMOD) << "CRITICAL BUG: CPU " << cpu_id << " has invalid assigned_region "
-                             << cpu.assigned_region;
+            SCP_FATAL(()) << "CRITICAL BUG: CPU " << cpu_id << " has invalid assigned_region " << cpu.assigned_region;
             sc_core::sc_stop();
             return;
         }
 
-        SCP_INFO(SCMOD) << "CPU " << cpu_id << " completed filling region " << cpu.assigned_region;
+        SCP_INFO(()) << "CPU " << cpu_id << " completed filling region " << cpu.assigned_region;
 
         uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
                                  (cpu.assigned_region * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
@@ -1664,19 +1673,19 @@ void SMMUTesterController::handle_complete(uint32_t cpu_id, CompleteType complet
         uint32_t original_filler_cpu = (first_word >> 32) & 0xFFFFFFFF;
 
         if (verify_region_pattern(original_filler_cpu, cpu.assigned_region)) {
-            SCP_INFO(SCMOD) << "Region " << cpu.assigned_region << " verified by tester";
+            SCP_INFO((TEST))("Region {:d} (for CPU_{:d}) verified by tester", cpu.assigned_region, original_filler_cpu);
             clear_region_pattern(cpu.assigned_region);
             m_available_regions.push(cpu.assigned_region);
             cpu.iteration_count++;
             m_global_iterations++;
         } else {
-            SCP_FATAL(SCMOD) << "Region " << cpu.assigned_region << " verification failed";
+            SCP_FATAL(()) << "Region " << cpu.assigned_region << " verification failed";
             sc_core::sc_stop();
             return;
         }
 
     } else if (complete == CHECK_DONE) {
-        SCP_WARN(SCMOD) << "CHECK_DONE reported by CPU " << cpu_id << " - this path is deprecated";
+        SCP_WARN(()) << "CHECK_DONE reported by CPU " << cpu_id << " - this path is deprecated";
         m_available_regions.push(cpu.assigned_region);
         cpu.iteration_count++;
         m_global_iterations++;
@@ -1690,7 +1699,7 @@ void SMMUTesterController::handle_complete(uint32_t cpu_id, CompleteType complet
     cpu.status = COMPLETE;
 
     if (m_global_iterations >= m_target_iterations) {
-        SCP_INFO(SCMOD) << "Target iterations reached: " << m_global_iterations;
+        SCP_INFO((TEST)) << "Target iterations reached: " << m_global_iterations;
         sc_core::sc_stop();
     }
 }
@@ -1727,7 +1736,7 @@ int sc_main(int argc, char* argv[])
         SCP_INFO("sc_main") << "Test failed";
         return 1;
     }
-
+    SCP_INFO("test")("Test done");
     SCP_INFO("sc_main") << "Test done";
     exit(0);
     return 0;
