@@ -28,7 +28,6 @@
 #include <tlm_utils/simple_initiator_socket.h>
 #include <pass.h>
 
-#define USE_PASS_FOR_IDENTITY
 /*
  * Helper module for memory access with proper routing
  */
@@ -243,7 +242,7 @@ private:
             break;
 
         case REG_DEBUG_DATA:
-            SCP_DEBUG(()) << "CPU " << cpu_id << " debug: 0x" << std::hex << data;
+            SCP_DEBUG(()) << "CPU " << cpu_id << " debug data: 0x" << std::hex << data;
             break;
 
         default:
@@ -382,7 +381,6 @@ private:
         case 0xE:
             SCP_FATAL(()) << "🚨 DIAGNOSTIC ERROR: CPU " << cpu_id
                           << " encountered fatal error - jumping to diagnostic handler at 0x200";
-            SCP_FATAL(()) << "This indicates a translation fault or other critical issue during CPU execution";
             sc_core::sc_stop();
             break;
         default:
@@ -473,8 +471,8 @@ public:
     static constexpr uint64_t VIRTUAL_TEST_ADDR = 0x300000000ULL; // 12GB virtual address
     static constexpr uint64_t
         PAGE_TABLE_BASE = 0x10000000; // Page tables: 0x10000000 - 0x1007FFFF (512KB for up to 32 CPUs)
-    static constexpr uint64_t REGION_BASE = 0x10080000; // Test regions: 0x10080000+ in 4KB blocks (after page tables)
-    static constexpr uint64_t REGION_SIZE = 0x1000;     // 4KB regions (one page each)
+    static constexpr uint64_t REGION_BASE = 0x10080000; // Test regions: 0x10080000+ in 8KB blocks (after page tables)
+    static constexpr uint64_t REGION_SIZE = 0x2000;     // 8KB regions (two pages each)
     static constexpr uint64_t PAGE_SIZE = 0x1000;       // 4KB pages
 
     SCP_LOGGER();
@@ -506,11 +504,8 @@ protected:
 
     // SMMU components
     gs::smmu500<> m_smmu;
-#ifdef USE_PASS_FOR_IDENTITY
-    std::vector<gs::pass<>*> m_pass_identity; // Pass-through for identity traffic
-#else
-    std::vector<gs::smmu500_tbu<>*> m_tbus_identity; // TBUs for identity traffic
-#endif
+
+    std::vector<gs::pass<>*> m_pass_identity;       // Pass-through for identity traffic
     std::vector<gs::smmu500_tbu<>*> m_tbus_high_va; // TBUs for high VA traffic
 
     // Routers
@@ -638,7 +633,6 @@ public:
 
         SCP_INFO(()) << "Creating SMMU Stress Test V2 with " << p_num_cpu.get_value() << " CPUs, " << m_num_regions
                      << " regions";
-        SCP_INFO(()) << "NEW ARCHITECTURE: Tester-controlled SMMU configuration";
 
         // Configure SMMU
 
@@ -655,30 +649,15 @@ public:
 
         // Create TBU instances - 2 TBUs per CPU (identity + high VA)
         uint32_t num_cpus = p_num_cpu.get_value();
-#ifdef USE_PASS_FOR_IDENTITY
         m_pass_identity.resize(num_cpus);
-#else
-        m_tbus_identity.resize(num_cpus);
-#endif
         m_tbus_high_va.resize(num_cpus);
 
         for (uint32_t i = 0; i < num_cpus; ++i) {
-#ifdef USE_PASS_FOR_IDENTITY
             // Identity pass-through for each CPU - bypasses SMMU for identity traffic
             char pass_identity_name[32];
             std::snprintf(pass_identity_name, sizeof(pass_identity_name), "pass_identity_%d", i);
             m_pass_identity[i] = new gs::pass<>(pass_identity_name);
             SCP_INFO(()) << "Identity pass-through constructed: CPU" << i << " (bypassing SMMU for identity traffic)";
-#else
-            // Identity TBU for each CPU - ALL share StreamID 0 → CB0
-            char tbu_identity_name[32];
-            std::snprintf(tbu_identity_name, sizeof(tbu_identity_name), "tbu_identity_%d", i);
-            m_tbus_identity[i] = new gs::smmu500_tbu<>(tbu_identity_name, &m_smmu);
-            m_tbus_identity[i]->p_topology_id = 0; // All identity TBUs share StreamID 0
-            m_tbus_identity[i]->p_topology_id.set_value(0);
-            SCP_INFO(()) << "Identity TBU constructed: CPU" << i << " topology_id=0"
-                         << " (StreamID 0 → CB0 shared identity)";
-#endif
 
             // High VA TBU for each CPU - unique StreamID per CPU
             char tbu_high_va_name[32];
@@ -712,30 +691,17 @@ public:
             m_cpu_routers[i]->add_initiator(m_cpus[i].socket);
 
             // Configure per-CPU router address ranges
-#ifdef USE_PASS_FOR_IDENTITY
             // Identity traffic (<0x300000000) -> Pass-through (bypasses SMMU)
             m_cpu_routers[i]->add_target(m_pass_identity[i]->target_socket, 0x0, 0x10000000ULL);
-#else
-            // Identity traffic (<0x300000000) -> Identity TBU
-            m_cpu_routers[i]->add_target(m_tbus_identity[i]->upstream_socket, 0x0, 0x10000000ULL);
-#endif
 
             // High VA traffic (>=0x300000000) -> High VA TBU
             m_cpu_routers[i]->add_target(m_tbus_high_va[i]->upstream_socket, 0x300000000ULL, 0x100000000ULL);
 
             SCP_INFO(()) << "🔍 ROUTING DEBUG: CPU " << i << " -> CPU_Router_" << i;
-#ifdef USE_PASS_FOR_IDENTITY
             SCP_INFO(()) << "  - Identity range [0x0 - 0x10000000] -> Pass_Identity_" << i << " (bypassing SMMU)";
-#else
-            SCP_INFO(()) << "  - Identity range [0x0 - 0x10000000] -> Identity_TBU_" << i << " (StreamID 0)";
-#endif
             SCP_INFO(()) << "  - High VA range [0x300000000 - 0x400000000] -> High_VA_TBU_" << i << " (StreamID "
                          << (i + 1) << ")";
-#ifdef USE_PASS_FOR_IDENTITY
             SCP_INFO(()) << "  - Identity pass name: " << m_pass_identity[i]->name();
-#else
-            SCP_INFO(()) << "  - Identity TBU name: " << m_tbus_identity[i]->name();
-#endif
             SCP_INFO(()) << "  - High VA TBU name: " << m_tbus_high_va[i]->name();
         }
 
@@ -750,11 +716,7 @@ public:
 
         // Connect TBU downstream sockets to global router
         for (uint32_t i = 0; i < p_num_cpu.get_value(); ++i) {
-#ifdef USE_PASS_FOR_IDENTITY
             m_global_router.add_initiator(m_pass_identity[i]->initiator_socket);
-#else
-            m_global_router.add_initiator(m_tbus_identity[i]->downstream_socket);
-#endif
             m_global_router.add_initiator(m_tbus_high_va[i]->downstream_socket);
         }
 
@@ -776,15 +738,10 @@ public:
 
     virtual ~CpuArmCortexA53SMMUStressTestV2()
     {
-#ifdef USE_PASS_FOR_IDENTITY
         for (auto* pass : m_pass_identity) {
             delete pass;
         }
-#else
-        for (auto* tbu : m_tbus_identity) {
-            delete tbu;
-        }
-#endif
+
         for (auto* tbu : m_tbus_high_va) {
             delete tbu;
         }
@@ -836,13 +793,12 @@ public:
         }
 
         // NEW ARCHITECTURE SUMMARY
-        SCP_INFO(()) << "SMMU StreamID Mapping Summary (NEW DUAL-TBU ARCHITECTURE):";
-        SCP_INFO(()) << "  StreamID 0 -> CB0 (SHARED identity for ALL CPUs - MMU disabled)";
+        SCP_INFO(()) << "SMMU StreamID Mapping Summary (NEW DUAL-TBU ARCHITECTURE):"
+                     << "  StreamID 0 -> CB0 (SHARED identity for ALL CPUs - MMU disabled)";
         for (uint32_t cpu = 0; cpu < p_num_cpu.get_value(); ++cpu) {
             SCP_INFO(()) << "  StreamID " << (cpu + 1) << " -> CB" << (cpu + 1) << " (CPU " << cpu
                          << " high VA - 4KB pages)";
         }
-        SCP_INFO(()) << "ARCHITECTURE: Shared identity CB0 + per-CPU high VA CBs!";
 
         // Initialize context banks for NEW DUAL-TBU ARCHITECTURE
         // CB0: SHARED identity context bank for ALL CPUs
@@ -861,7 +817,6 @@ public:
         }
 
         SCP_INFO(()) << "SMMU configuration completed - ready for tester control";
-        SCP_INFO(()) << "✅ CRITICAL FIX APPLIED: All CPUs now have complete page table structures";
     }
 
     void setup_identity_context_bank(uint32_t cpu)
@@ -976,18 +931,16 @@ public:
         uint64_t l3_readback = m_memory_accessor.read_memory(l3_table_addr + (0 * 8));
 
         SCP_INFO(()) << "  - L3[0]: VA=0x0 -> PA=0x" << std::hex << default_physical_addr << " (CPU " << cpu
-                     << " specific default mapping)";
-        SCP_INFO(()) << "  - L3 table address: 0x" << std::hex << l3_table_addr;
-        SCP_INFO(()) << "  - L3[0] descriptor written: 0x" << std::hex << l3_desc_0;
-        SCP_INFO(()) << "  - L3[0] descriptor readback: 0x" << std::hex << l3_readback;
-        SCP_INFO(()) << "  - Writing L3[0] to address: 0x" << std::hex << (l3_table_addr + (0 * 8));
+                     << " specific default mapping)"
+                     << "  - L3 table address: 0x" << std::hex << l3_table_addr << "  - L3[0] descriptor written: 0x"
+                     << std::hex << l3_desc_0 << "  - L3[0] descriptor readback: 0x" << std::hex << l3_readback
+                     << "  - Writing L3[0] to address: 0x" << std::hex << (l3_table_addr + (0 * 8));
 
         if (l3_readback != l3_desc_0) {
-            SCP_FATAL(()) << "🚨 CRITICAL: L3[0] descriptor write/read mismatch for CPU " << cpu << "!";
-            SCP_FATAL(()) << "  Expected: 0x" << std::hex << l3_desc_0;
-            SCP_FATAL(()) << "  Got: 0x" << std::hex << l3_readback;
-            SCP_FATAL(()) << "  L3 table address: 0x" << std::hex << l3_table_addr;
-            SCP_FATAL(()) << "  Write address: 0x" << std::hex << (l3_table_addr + (0 * 8));
+            SCP_FATAL(()) << "🚨 CRITICAL: L3[0] descriptor write/read mismatch for CPU " << cpu << "!"
+                          << "  Expected: 0x" << std::hex << l3_desc_0 << "  Got: 0x" << std::hex << l3_readback
+                          << "  L3 table address: 0x" << std::hex << l3_table_addr << "  Write address: 0x" << std::hex
+                          << (l3_table_addr + (0 * 8));
         } else {
             SCP_INFO(()) << "✅ L3[0] descriptor verification successful for CPU " << cpu;
         }
@@ -1003,8 +956,8 @@ public:
         write_smmu_register(cb_base + CB_TTBR0_LOW_OFFSET, static_cast<uint32_t>(l0_table_addr & 0xFFFFFFFF));
         write_smmu_register(cb_base + CB_TTBR0_HIGH_OFFSET, static_cast<uint32_t>((l0_table_addr >> 32) & 0xFFFFFFFF));
 
-        SCP_INFO(()) << "  - TTBR0 SET: CB" << cb << " TTBR0=0x" << std::hex << l0_table_addr;
-        SCP_INFO(()) << "  - Expected L3 table at: 0x" << std::hex << (l0_table_addr + (PAGE_SIZE * 3));
+        SCP_INFO(()) << "  - TTBR0 SET: CB" << cb << " TTBR0=0x" << std::hex << l0_table_addr
+                     << "  - Expected L3 table at: 0x" << std::hex << (l0_table_addr + (PAGE_SIZE * 3));
 
         // Configure TCR for 4KB pages, 48-bit VA space
         write_smmu_register(cb_base + CB_TCR_OFFSET,
@@ -1018,13 +971,42 @@ public:
         uint32_t sctlr_value = (1 << 0) | (1 << 2) | (1 << 4); // M, A, C bits enabled
         write_smmu_register(cb_base + CB_SCTLR_OFFSET, sctlr_value);
 
-        SCP_INFO(()) << "✅ CONSOLIDATED SETUP COMPLETE: CPU " << cpu << " CB" << cb;
-        SCP_INFO(()) << "  - Page tables initialized with consistent addressing";
-        SCP_INFO(()) << "  - Context bank configured once with MMU enabled";
-        SCP_INFO(()) << "  - Function conflicts resolved - no duplicate configuration";
+        SCP_INFO(()) << "SETUP COMPLETE: CPU " << cpu << " CB" << cb;
         SCP_INFO(()) << "  - L0[0] -> L1 table, L1[0]: Identity mapping, L1[" << std::dec << l1_index << "] -> High VA";
     }
+    void clear_region_pattern(uint32_t region_id)
+    {
+        uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
+                                 (region_id * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
 
+        SCP_INFO(()) << "Clearing region " << region_id << " (2-PAGE) at physical address 0x" << std::hex
+                     << physical_addr;
+
+        const uint32_t words_to_clear = CpuArmCortexA53SMMUStressTestV2::BOUNDARY_BYTES / 8;
+        const uint32_t num_pages = CpuArmCortexA53SMMUStressTestV2::REGION_SIZE /
+                                   CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE;
+
+        // Loop over all pages in the region (2 pages for 8KB regions)
+        for (uint32_t page_num = 0; page_num < num_pages; ++page_num) {
+            uint64_t page_physical_addr = physical_addr + (page_num * CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE);
+
+            SCP_INFO(()) << "  - Clearing page " << page_num << " at PA=0x" << std::hex << page_physical_addr;
+
+            // Clear the beginning of this page
+            for (uint32_t i = 0; i < words_to_clear; ++i) {
+                write_memory_64(page_physical_addr + (i * 8), 0xCAFE0000 + i);
+            }
+
+            // Clear the end of this page
+            for (uint32_t i = 0; i < words_to_clear; ++i) {
+                write_memory_64(
+                    page_physical_addr + CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE - (words_to_clear * 8) + (i * 8),
+                    0xBEEF0000 + i);
+            }
+        }
+
+        SCP_INFO(()) << "✅ Region " << region_id << " cleared (all " << num_pages << " pages)";
+    }
     void map_cpu_to_region(uint32_t cpu, uint32_t region)
     {
         // Validate parameters
@@ -1040,6 +1022,8 @@ public:
         const auto pt_addrs = get_page_table_addresses_for_cpu(cpu);
 
         SCP_INFO(()) << "Starting map_cpu_to_region for CPU " << cpu << " -> Region " << region;
+
+        clear_region_pattern(region);
 
         // Step 1: Update page tables
         create_page_table_mapping(cpu, VIRTUAL_TEST_ADDR, physical_addr, REGION_SIZE);
@@ -1058,10 +1042,6 @@ public:
         assert((virtual_addr & 0xFFF) == 0 && "Virtual address must be page-aligned");
         assert(size == REGION_SIZE && "Size must match REGION_SIZE");
 
-        // CRITICAL FIX: Create separate page tables for HIGH VA context banks (CB2/CB3)
-        // CB2/CB3 need L1[0] to map VA=0x0 directly to the region's physical address
-        // This is different from CB0/CB1 which use identity mapping
-
         // Use separate page table space for high VA context banks
         const auto pt_addrs = get_page_table_addresses_for_cpu(cpu);
 
@@ -1070,41 +1050,45 @@ public:
         uint64_t l2_table_addr = pt_addrs.l2;
         uint64_t l3_table_addr = pt_addrs.l3;
 
-        SCP_INFO(()) << "🔍 CRITICAL FIX: Creating HIGH VA page tables for CPU " << cpu;
+        // Calculate number of pages to map
+        uint32_t num_pages = size / PAGE_SIZE;
+
+        SCP_INFO(()) << "🔍 TWO-PAGE MAPPING: Creating page tables for CPU " << cpu << " (" << num_pages << " pages)";
         SCP_INFO(()) << "  - High VA CB page table offset: 0x" << std::hex << (pt_addrs.l0 - PAGE_TABLE_BASE);
         SCP_INFO(()) << "  - L0 table: 0x" << std::hex << l0_table_addr;
         SCP_INFO(()) << "  - L1 table: 0x" << std::hex << l1_table_addr;
         SCP_INFO(()) << "  - L2 table: 0x" << std::hex << l2_table_addr;
         SCP_INFO(()) << "  - L3 table: 0x" << std::hex << l3_table_addr;
 
-        // OPTIMIZED: Only update L3[0] entry - page table structure already exists from setup
-        // The complete L0→L1→L2→L3 structure was created in setup_complete_high_va_context_bank()
-        // We only need to update the final L3[0] mapping to point to the new region
+        // Map each page in the region
+        // For 2-page regions: L3[0] maps page 0, L3[1] maps page 1
+        for (uint32_t page = 0; page < num_pages; ++page) {
+            uint64_t page_pa = physical_addr + (page * PAGE_SIZE);
 
-        // Update L3[0] to map VA=0x0 to the NEW region's physical address
-        // SH=0b11 (inner shareable) at bits [3:2], AF=1, AttrIndx=0b011, NS=1, page type=0b11
-        uint64_t l3_desc_0 = (physical_addr & ~0xFFFULL) | (1ULL << 10) | (3ULL << 8) | (3ULL << 2) | (1ULL << 6) |
-                             0x3ULL;
-        write_memory_64(l3_table_addr + (0 * 8), l3_desc_0);
+            // Create L3 descriptor for this page
+            // SH=0b11 (inner shareable) at bits [3:2], AF=1, AttrIndx=0b011, NS=1, page type=0b11
+            uint64_t l3_desc = (page_pa & ~0xFFFULL) | (1ULL << 10) | (3ULL << 8) | (3ULL << 2) | (1ULL << 6) | 0x3ULL;
+            write_memory_64(l3_table_addr + (page * 8), l3_desc);
 
-        // Verify the L3[0] update was successful
-        uint64_t l3_readback = m_memory_accessor.read_memory(l3_table_addr + (0 * 8));
-        uint64_t extracted_physical = l3_readback & ~0xFFFULL;
+            // Verify the L3 entry was written correctly
+            uint64_t l3_readback = m_memory_accessor.read_memory(l3_table_addr + (page * 8));
+            uint64_t extracted_physical = l3_readback & ~0xFFFULL;
 
-        SCP_INFO(()) << "✅ OPTIMIZED page table update for CPU " << cpu << ":";
-        SCP_INFO(()) << "  - L3[0]: VA=0x0 -> PA=0x" << std::hex << physical_addr << " (region "
-                     << ((physical_addr - REGION_BASE) / REGION_SIZE) << ")";
-        SCP_INFO(()) << "  - L3[0] descriptor: 0x" << std::hex << l3_desc_0;
-        SCP_INFO(()) << "  - L3[0] readback: 0x" << std::hex << l3_readback;
-        SCP_INFO(()) << "  - Extracted physical: 0x" << std::hex << extracted_physical;
+            SCP_INFO(()) << "  - L3[" << page << "]: VA=0x" << std::hex << (page * PAGE_SIZE) << " -> PA=0x" << page_pa
+                         << "    Descriptor: 0x" << std::hex << l3_desc << "    Readback: 0x" << std::hex
+                         << l3_readback;
 
-        if (extracted_physical != physical_addr) {
-            SCP_FATAL(()) << "🚨 CRITICAL: L3[0] physical address mismatch!";
-            SCP_FATAL(()) << "  Expected: 0x" << std::hex << physical_addr;
-            SCP_FATAL(()) << "  Found: 0x" << std::hex << extracted_physical;
-        } else {
-            SCP_INFO(()) << "✅ L3[0] physical address verification successful";
+            if (extracted_physical != page_pa) {
+                SCP_FATAL(()) << "🚨 CRITICAL: L3[" << page << "] physical address mismatch!"
+                              << "  Expected: 0x" << std::hex << page_pa << "  Found: 0x" << std::hex
+                              << extracted_physical;
+            } else {
+                SCP_INFO(()) << "    ✅ L3[" << page << "] verification successful";
+            }
         }
+
+        SCP_INFO(()) << "✅ TWO-PAGE mapping complete for CPU " << cpu << " (region "
+                     << ((physical_addr - REGION_BASE) / REGION_SIZE) << ")";
 
         // CRITICAL FIX: Invalidate SMMU TLB after page table update
         // The SMMU TLB caches old translations and must be invalidated when page tables change
@@ -1256,52 +1240,39 @@ public:
                 orr x0, x0, x23               // Include region ID
                 str x0, [x21, #0x28]          // Write to REG_DEBUG
 
-                // Fill the region at virtual address
-                ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR
+                // Fill the region at virtual address - DYNAMIC PAGE COUNT
+                ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR (base)
                 mov x4, #%u                   // Boundary bytes to write at each boundary
                 lsr x4, x4, #3                // Convert bytes to 8-byte words
-                mov x5, #0                    // Offset counter
+                mov x26, #0                   // Page number (starts at 0)
+                mov x19, #%u                  // Number of pages in region (use x19, not x30)
                 
-            fill_loop_start:
-                cmp x5, x4
-                b.ge fill_loop_end
-                
-                // Generate pattern
-                lsl x24, x20, #32
-                lsl x25, x23, #16
-                orr x24, x24, x25
-                orr x24, x24, x22
-                
-                // Write at the beginning of the block
-                lsl x6, x5, #3
-                add x6, x3, x6
-                str x24, [x6]
-                
-                add x5, x5, #1
-                b fill_loop_start
-                
-            fill_loop_end:
-                mov x5, #0
-            fill_loop_start_end:
-                cmp x5, x4
+            fill_page_loop:
+                cmp x26, x19                  // Loop over num_pages (using x19)
                 b.ge fill_done
+                
+                // Calculate page base address: base + (page_num * PAGE_SIZE)
+                mov x27, #1                   // Start with 1
+                lsl x27, x27, #12             // Shift left by 12 to get 0x1000 (4KB)
+                mul x28, x26, x27             // page_offset = page_num * PAGE_SIZE
+                add x29, x3, x28              // page_base = VIRTUAL_TEST_ADDR + page_offset
+                
+                // Call fill_boundary for the start of the page
+                mov x0, x29                   // Arg 1: base address
+                bl fill_boundary
 
-                // Generate pattern
-                lsl x24, x20, #32
-                lsl x25, x23, #16
-                orr x24, x24, x25
-                orr x24, x24, x22
+                // Calculate end boundary address
+                mov x6, #1
+                lsl x6, x6, #12               // x6 = 0x1000 (PAGE_SIZE)
+                sub x6, x6, x4, lsl #3        // x6 = 0x1000 - (words * 8)
+                add x0, x29, x6               // end_boundary_addr = page_base + offset
+                
+                // Call fill_boundary for the end of the page
+                bl fill_boundary
 
-                // Write at the end of the block
-                mov x6, #%u
-                sub x6, x6, x4, lsl #3
-                add x6, x3, x6
-                lsl x7, x5, #3
-                add x6, x6, x7
-                str x24, [x6]
-
-                add x5, x5, #1
-                b fill_loop_start_end
+            fill_page_next:
+                add x26, x26, #1              // Next page
+                b fill_page_loop
 
             fill_done:
                 // Signal fill complete
@@ -1312,110 +1283,8 @@ public:
                 b main_loop
 
             try_check:
-                // Try to get a region to check
-                mov x0, #2                    // CHECK_REQUEST
-                str x0, [x21, #0x00]          // Write to REG_REQUEST
-
-            poll_check:
-                ldr x0, [x21, #0x08]          // Read REG_STATUS
-                cmp x0, #1                    // READY?
-                b.eq check_ready
-                cmp x0, #0                    // BUSY?
-                b.eq main_loop                // Back to main loop
-                b poll_check
-
-            check_ready:
-                // Get assigned region ID
-                ldr x23, [x21, #0x10]
-
-                // Verify region pattern
-                ldr x3, =0x%016)" PRIx64 R"(   // VIRTUAL_TEST_ADDR
-                mov x5, #0
-                mov x6, #%u                   // Boundary bytes to verify
-                lsr x6, x6, #3                // Convert to 8-byte words
-            verify_loop_start:
-                cmp x5, x6
-                b.ge verify_loop_end
-
-                lsl x7, x5, #3
-                add x7, x3, x7
-                ldr x8, [x7]
-                
-                lsr x9, x8, #16
-                and x9, x9, #0xFFFF
-                cmp x9, x23
-                b.ne pattern_error
-                
-                add x5, x5, #1
-                b verify_loop_start
-
-            verify_loop_end:
-                mov x5, #0
-            verify_loop_start_end:
-                cmp x5, x6
-                b.ge verify_success
-
-                mov x7, #%u
-                sub x7, x7, x6, lsl #3
-                add x7, x3, x7
-                lsl x8, x5, #3
-                add x7, x7, x8
-                ldr x8, [x7]
-
-                lsr x9, x8, #16
-                and x9, x9, #0xFFFF
-                cmp x9, x23
-                b.ne pattern_error
-                
-                add x5, x5, #1
-                b verify_loop_start_end
-
-            verify_success:
-                // Clear region
-                ldr x3, =0x%016)" PRIx64 R"(
-                mov x4, #%u                   // Boundary bytes to clear
-                lsr x4, x4, #3                // Convert bytes to 8-byte words
-                mov x7, #0
-                mov x5, #0
-            clear_loop_start:
-                cmp x5, x4
-                b.ge clear_loop_end
-
-                lsl x8, x5, #3
-                add x8, x3, x8
-                str x7, [x8]
-                
-                add x5, x5, #1
-                b clear_loop_start
-
-            clear_loop_end:
-                mov x5, #0
-            clear_loop_start_end:
-                cmp x5, x4
-                b.ge clear_done
-
-                mov x8, #%u
-                sub x8, x8, x4, lsl #3
-                add x8, x3, x8
-                lsl x9, x5, #3
-                add x8, x8, x9
-                str x7, [x8]
-                
-                add x5, x5, #1
-                b clear_loop_start_end
-
-            clear_done:
-                // Signal check complete
-                mov x0, #2
-                str x0, [x21, #0x18]
-
-                add x22, x22, #1
+                // No regions to check - just loop back
                 b main_loop
-
-            pattern_error:
-                mov x0, #0xD000
-                str x0, [x21, #0x28]
-                b end
 
             test_complete:
                 b end
@@ -1423,7 +1292,70 @@ public:
             end:
                 wfi
                 b end
+
+            // -------------------------------------------------------------
+            // fill_boundary function
+            //
+            // Fills a memory boundary with an enhanced, verifiable pattern.
+            // Pattern: CPU_ID | REGION_ID | PAGE_NUM | WORD_OFFSET
+            //
+            // Assumed Global Registers (read-only):
+            //   - x20: CPU ID
+            //   - x23: Region ID
+            //   - x26: Current Page Number
+            //   - x4:  Number of 8-byte words to write
+            //
+            // Arguments:
+            //   - x0:  Base address to start writing from
+            //
+            // Clobbered Registers (Temporaries):
+            //   - x5, x6, x7
+            // -------------------------------------------------------------
+            fill_boundary:
+                mov x5, #0                    // x5: Word offset, loop counter
+            fill_boundary_loop:
+                cmp x5, x4                    // Loop for `x4` words
+                b.ge fill_boundary_done
+
+                // --- Start Pattern Generation ---
+                mov x6, #0                    // x6: The final pattern register. Clear before use.
+
+                // 1. CPU ID (bits 63:32)
+                lsl x7, x20, #32              // Shift CPU ID into temp register x7
+                orr x6, x6, x7                // OR into pattern
+
+                // 2. Region ID (bits 31:16)
+                lsl x7, x23, #16              // Shift Region ID into temp register x7
+                orr x6, x6, x7                // OR into pattern
+
+                // 3. Page Number (bits 15:8)
+                lsl x7, x26, #8               // Shift Page Number into temp register x7
+                orr x6, x6, x7                // OR into pattern
+
+                // 4. Word Offset (bits 7:0)
+                orr x6, x6, x5                // OR Word Offset directly into pattern
+
+                // --- End Pattern Generation ---
+
+                // Calculate write address and store the pattern
+                lsl x7, x5, #3                // word_offset_in_bytes = word_offset * 8
+                add x7, x0, x7                // final_addr = base_addr + word_offset_in_bytes
+                
+                // DEBUG: Write the pattern and target address to the debug registers
+                //str x6, [x21, #0x28]
+                //str x7, [x21, #0x30]
+                
+                str x6, [x7]
+
+                add x5, x5, #1                // Increment word offset
+                b fill_boundary_loop
+
+            fill_boundary_done:
+                ret
         )";
+
+        // Calculate number of pages per region
+        uint32_t num_pages = REGION_SIZE / PAGE_SIZE;
 
         char main_buf[8192];
         std::snprintf(main_buf, sizeof(main_buf), MAIN_FIRMWARE,
@@ -1431,13 +1363,7 @@ public:
                       MAX_ITERATIONS,                        // %2: MAX_ITERATIONS
                       VIRTUAL_TEST_ADDR,                     // %3: VIRTUAL_TEST_ADDR (fill)
                       static_cast<unsigned>(BOUNDARY_BYTES), // %4: boundary bytes (fill)
-                      static_cast<unsigned>(PAGE_SIZE),      // %5: page size
-                      VIRTUAL_TEST_ADDR,                     // %6: VIRTUAL_TEST_ADDR (verify)
-                      static_cast<unsigned>(BOUNDARY_BYTES), // %7: boundary bytes (verify)
-                      static_cast<unsigned>(PAGE_SIZE),      // %8: page size
-                      VIRTUAL_TEST_ADDR,                     // %9: VIRTUAL_TEST_ADDR (clear)
-                      static_cast<unsigned>(BOUNDARY_BYTES), // %10: boundary bytes (clear)
-                      static_cast<unsigned>(PAGE_SIZE));     // %11: page size
+                      num_pages);                            // %5: number of pages per region
 
         set_firmware(main_buf, MAIN_FIRMWARE_ADDR);
 
@@ -1506,12 +1432,11 @@ public:
 
     virtual void end_of_simulation() override
     {
-        SCP_INFO(()) << "SMMU Stress Test V2 completed";
-        SCP_INFO(()) << "Final statistics:";
-        SCP_INFO(()) << "  - Total iterations: " << m_tester_controller.m_global_iterations << "/" << MAX_ITERATIONS;
-        SCP_INFO(()) << "  - CPUs: " << p_num_cpu.get_value();
-        SCP_INFO(()) << "  - Memory regions: " << m_num_regions;
-        SCP_INFO(()) << "  - Pattern size: " << PATTERN_SIZE << " * 8 bytes";
+        SCP_WARN(()) << "SMMU Stress Test V2 completed"
+                     << "\nFinal statistics:"
+                     << "\n  - Total iterations: " << m_tester_controller.m_global_iterations << "/" << MAX_ITERATIONS
+                     << "\n  - CPUs: " << p_num_cpu.get_value() << "\n  - Memory regions: " << m_num_regions
+                     << "\n  - Pattern size: " << PATTERN_SIZE << " * 8 bytes";
     }
 };
 
@@ -1579,42 +1504,72 @@ bool SMMUTesterController::verify_region_pattern(uint32_t cpu_id, uint32_t regio
     uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
                              (region_id * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
 
-    SCP_INFO(()) << "Verifying region " << region_id << " at physical address 0x" << std::hex << physical_addr;
+    SCP_INFO(()) << "Verifying region " << region_id << " with ENHANCED 2-PAGE pattern at PA=0x" << std::hex
+                 << physical_addr;
 
-    const uint32_t words_to_check = 8;
-    // Check the beginning of the block
-    for (uint32_t i = 0; i < words_to_check; ++i) {
-        uint64_t word_addr = physical_addr + (i * 8);
-        uint64_t read_value = m_parent->m_memory_accessor.read_memory(word_addr);
+    const uint32_t words_to_check = 10; // Check 10 words (80 bytes) at each boundary
+    const uint32_t num_pages = CpuArmCortexA53SMMUStressTestV2::REGION_SIZE /
+                               CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE;
 
-        uint32_t pattern_cpu_id = (read_value >> 32) & 0xFFFFFFFF;
-        uint32_t pattern_region_id = (read_value >> 16) & 0xFFFF;
+    // Loop over all pages in the region (2 pages for 8KB regions)
+    for (uint32_t page_num = 0; page_num < num_pages; ++page_num) {
+        uint64_t page_physical_addr = physical_addr + (page_num * CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE);
 
-        if (pattern_region_id != region_id || pattern_cpu_id != cpu_id) {
-            SCP_FATAL(()) << "Pattern mismatch in region " << region_id << " at beginning offset " << i;
-            return false;
+        SCP_INFO(()) << "  - Verifying page " << page_num << " at PA=0x" << std::hex << page_physical_addr;
+
+        // Check the beginning of this page
+        for (uint32_t word = 0; word < words_to_check; ++word) {
+            uint64_t word_addr = page_physical_addr + (word * 8);
+            uint64_t read_value = m_parent->m_memory_accessor.read_memory(word_addr);
+
+            // Extract all pattern fields
+            uint32_t pattern_cpu = (read_value >> 32) & 0xFFFFFFFF;
+            uint32_t pattern_region = (read_value >> 16) & 0xFFFF;
+            uint32_t pattern_page = (read_value >> 8) & 0xFF;
+            uint32_t pattern_offset = read_value & 0xFF;
+
+            if (pattern_cpu != cpu_id || pattern_region != region_id || pattern_page != page_num ||
+                pattern_offset != word) {
+                SCP_FATAL(()) << "🚨 ENHANCED PATTERN MISMATCH at region " << region_id << " page " << page_num
+                              << " START, word " << word << " | Expected: CPU=" << cpu_id << " Region=" << region_id
+                              << " Page=" << page_num << " Offset=" << word << " | Got: CPU=" << pattern_cpu
+                              << " Region=" << pattern_region << " Page=" << pattern_page
+                              << " Offset=" << pattern_offset << " | Raw value: 0x" << std::hex << read_value;
+                return false;
+            }
         }
+
+        // Check the end of this page
+        for (uint32_t word = 0; word < words_to_check; ++word) {
+            uint64_t word_addr = page_physical_addr + CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE -
+                                 (words_to_check * 8) + (word * 8);
+            uint64_t read_value = m_parent->m_memory_accessor.read_memory(word_addr);
+
+            uint32_t pattern_cpu = (read_value >> 32) & 0xFFFFFFFF;
+            uint32_t pattern_region = (read_value >> 16) & 0xFFFF;
+            uint32_t pattern_page = (read_value >> 8) & 0xFF;
+            uint32_t pattern_offset = read_value & 0xFF;
+
+            if (pattern_cpu != cpu_id || pattern_region != region_id || pattern_page != page_num ||
+                pattern_offset != word) {
+                SCP_FATAL(()) << "🚨 ENHANCED PATTERN MISMATCH at region " << region_id << " page " << page_num
+                              << " END, word " << word << " | Expected: CPU=" << cpu_id << " Region=" << region_id
+                              << " Page=" << page_num << " Offset=" << word << " | Got: CPU=" << pattern_cpu
+                              << " Region=" << pattern_region << " Page=" << pattern_page
+                              << " Offset=" << pattern_offset << " | Raw value: 0x" << std::hex << read_value;
+                return false;
+            }
+        }
+
+        SCP_INFO(()) << "    ✅ Page " << page_num << " verified successfully";
     }
 
-    // Check the end of the block
-    for (uint32_t i = 0; i < words_to_check; ++i) {
-        uint64_t word_addr = physical_addr + CpuArmCortexA53SMMUStressTestV2::REGION_SIZE - (words_to_check * 8) +
-                             (i * 8);
-        uint64_t read_value = m_parent->m_memory_accessor.read_memory(word_addr);
-
-        uint32_t pattern_cpu_id = (read_value >> 32) & 0xFFFFFFFF;
-        uint32_t pattern_region_id = (read_value >> 16) & 0xFFFF;
-
-        if (pattern_region_id != region_id || pattern_cpu_id != cpu_id) {
-            SCP_FATAL(()) << "Pattern mismatch in region " << region_id << " at end offset " << i;
-            return false;
-        }
-    }
-
-    SCP_INFO(()) << "Region " << region_id << " verification successful";
+    SCP_INFO(()) << "✅ Region " << region_id << " ENHANCED 2-PAGE pattern verification successful"
+                 << "  - CPU=" << cpu_id << " Region=" << region_id << " - All " << num_pages << " pages verified";
     return true;
 }
 
+/*
 void SMMUTesterController::clear_region_pattern(uint32_t region_id)
 {
     if (!m_parent) {
@@ -1625,23 +1580,34 @@ void SMMUTesterController::clear_region_pattern(uint32_t region_id)
     uint64_t physical_addr = CpuArmCortexA53SMMUStressTestV2::REGION_BASE +
                              (region_id * CpuArmCortexA53SMMUStressTestV2::REGION_SIZE);
 
-    SCP_INFO(()) << "Clearing region " << region_id << " at physical address 0x" << std::hex << physical_addr;
+    SCP_INFO(()) << "Clearing region " << region_id << " (2-PAGE) at physical address 0x" << std::hex << physical_addr;
 
-    const uint32_t words_to_clear = 8;
-    // Clear the beginning of the block
-    for (uint32_t i = 0; i < words_to_clear; ++i) {
-        m_parent->write_memory_64(physical_addr + (i * 8), 0);
+    const uint32_t words_to_clear = CpuArmCortexA53SMMUStressTestV2::BOUNDARY_BYTES / 8;
+    const uint32_t num_pages = CpuArmCortexA53SMMUStressTestV2::REGION_SIZE /
+                               CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE;
+
+    // Loop over all pages in the region (2 pages for 8KB regions)
+    for (uint32_t page_num = 0; page_num < num_pages; ++page_num) {
+        uint64_t page_physical_addr = physical_addr + (page_num * CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE);
+
+        SCP_INFO(()) << "  - Clearing page " << page_num << " at PA=0x" << std::hex << page_physical_addr;
+
+        // Clear the beginning of this page
+        for (uint32_t i = 0; i < words_to_clear; ++i) {
+            m_parent->write_memory_64(page_physical_addr + (i * 8), 0xCAFE0000 + i);
+        }
+
+        // Clear the end of this page
+        for (uint32_t i = 0; i < words_to_clear; ++i) {
+            m_parent->write_memory_64(
+                page_physical_addr + CpuArmCortexA53SMMUStressTestV2::PAGE_SIZE - (words_to_clear * 8) + (i * 8),
+                0xBEEF0000 + i);
+        }
     }
 
-    // Clear the end of the block
-    for (uint32_t i = 0; i < words_to_clear; ++i) {
-        m_parent->write_memory_64(
-            physical_addr + CpuArmCortexA53SMMUStressTestV2::REGION_SIZE - (words_to_clear * 8) + (i * 8), 0);
-    }
-
-    SCP_INFO(()) << "Region " << region_id << " cleared";
+    SCP_INFO(()) << "✅ Region " << region_id << " cleared (all " << num_pages << " pages)";
 }
-
+*/
 /* ---- Implementation moved here to ensure CpuArmCortexA53SMMUStressTestV2 is a complete type ---- */
 
 /**
@@ -1660,7 +1626,7 @@ void SMMUTesterController::handle_complete(uint32_t cpu_id, CompleteType complet
 
     if (complete == FILL_DONE) {
         if (cpu.assigned_region >= m_num_regions) {
-            SCP_FATAL(()) << "CRITICAL BUG: CPU " << cpu_id << " has invalid assigned_region " << cpu.assigned_region;
+            SCP_FATAL(()) << "CPU " << cpu_id << " has invalid assigned_region " << cpu.assigned_region;
             sc_core::sc_stop();
             return;
         }
@@ -1674,7 +1640,7 @@ void SMMUTesterController::handle_complete(uint32_t cpu_id, CompleteType complet
 
         if (verify_region_pattern(original_filler_cpu, cpu.assigned_region)) {
             SCP_INFO((TEST))("Region {:d} (for CPU_{:d}) verified by tester", cpu.assigned_region, original_filler_cpu);
-            clear_region_pattern(cpu.assigned_region);
+            // clear_region_pattern(cpu.assigned_region);
             m_available_regions.push(cpu.assigned_region);
             cpu.iteration_count++;
             m_global_iterations++;
@@ -1709,7 +1675,7 @@ int sc_main(int argc, char* argv[])
     scp::init_logging(scp::LogConfig()
                           .fileInfoFrom(sc_core::SC_ERROR)
                           .logAsync(false)
-                          .logLevel(scp::log::INFO)
+                          .logLevel(scp::log::WARNING)
                           .msgTypeFieldWidth(30));
 
     gs::ConfigurableBroker m_broker{};

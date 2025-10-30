@@ -117,13 +117,6 @@ protected:
         }
         return table.end();
     }
-    bool matches_region(uint64_t base, uint64_t mask, uint64_t start, uint64_t end)
-    {
-        uint64_t sm = start & mask;
-        uint64_t em = end & mask;
-
-        return sm == base || em == base || (std::min(sm, em) <= base && base <= std::max(sm, em));
-    }
 
     void init_payload(TlmPayload& trans, tlm::tlm_command command, uint64_t addr, uint64_t* val, unsigned int size)
     {
@@ -173,6 +166,8 @@ protected:
         TlmPayload ltrans;
         uint64_t tmp;
 
+        SCP_TRACE(())("dmi_translate for base 0x{:x} addr 0x{:x}", base_addr, addr);
+
         /*
          * Fast path : check to see if the TE is already cached, if so return it straight away.
          * NB, this happens rarely, as QEMU will cache the result itself, but
@@ -185,9 +180,14 @@ protected:
             auto it = find_region(iommumr->m_mapped_te, addr);
             if (it != iommumr->m_mapped_te.end()) {
                 *te = it->second;
+                // This is the DMI cache, so we must re-construct the actual required TE from this case.
+                // It will likely have a 'stale' address.
+                te->iova = addr;
+                te->translated_addr = (it->second.translated_addr & ~(it->second.addr_mask)) +
+                                      (addr & (it->second.addr_mask));
 
                 SCP_TRACE(())
-                ("FAST translate for 0x{:x} :  0x{:x}->0x{:x} (mask 0x{:x}) perl={}", addr, te->iova,
+                ("FAST translate for 0x{:x} :  0x{:x}->0x{:x} (mask 0x{:x}) perm={}", addr, te->iova,
                  te->translated_addr, te->addr_mask, te->perm);
 
                 return;
@@ -231,10 +231,12 @@ protected:
                 }
 
                 te->target_as = iommumr->m_as_te->get_ptr();
-                te->addr_mask = ldmi_data.get_end_address() - ldmi_data.get_start_address();
+                auto mask = ldmi_data.get_end_address() - ldmi_data.get_start_address();
+                te->addr_mask = mask;
                 te->iova = addr;
                 te->translated_addr = (lu_dmi_data.get_start_address() +
-                                       (ldmi_data.get_dmi_ptr() - lu_dmi_data.get_dmi_ptr()));
+                                       (ldmi_data.get_dmi_ptr() - lu_dmi_data.get_dmi_ptr())) +
+                                      (addr & mask);
                 te->perm = (qemu::IOMMUMemoryRegion::IOMMUAccessFlags)ldmi_data.get_granted_access();
 
                 SCP_DEBUG(())
@@ -264,7 +266,10 @@ protected:
             }
 
             std::lock_guard<std::mutex> lock(m_mutex);
-
+            /* It is possible that this region overlaps an existing region (a 1-1 MMIO).
+             * QEMU will likely take this region, but both should be valid, and the other
+             * region will be removed in due course
+             */
             iommumr->m_mapped_te[addr & ~te->addr_mask] = *te;
 
             SCP_DEBUG(())
@@ -280,6 +285,9 @@ protected:
             te->translated_addr = (addr & ~te->addr_mask) + base_addr;
             te->perm = qemu::IOMMUMemoryRegion::IOMMU_RW;
 
+            if (iommumr->m_mapped_te.find(addr & ~te->addr_mask) != iommumr->m_mapped_te.end()) {
+                SCP_FATAL(())("Trying to add a 1-1 mapping over an existing mapping");
+            }
             // We need to add it so we can remove it (!)
             iommumr->m_mapped_te[addr & ~te->addr_mask] = *te;
 
@@ -834,6 +842,12 @@ private:
         }
     }
 
+    bool region_match(uint64_t mr_rel_start, uint64_t mr_rel_end, uint64_t addr, uint64_t mask)
+    {
+        uint64_t end = addr + mask + 1;
+        return (mr_rel_start <= end && mr_rel_end >= addr);
+    }
+
 public:
     virtual void invalidate_direct_mem_ptr(sc_dt::uint64 start_range, sc_dt::uint64 end_range)
     {
@@ -847,12 +861,15 @@ public:
             auto mr_end = m.first + m.second->get_size() - 1;
             // if the MR overlaps or is overlapped by the invalidation range
             if (start_range <= mr_end && mr_start <= end_range) {
-                auto it = m.second->m_mapped_te.lower_bound(start_range);
+                auto mr_rel_start = start_range - mr_start;
+                auto mr_rel_end = end_range - mr_start;
+                auto it = m.second->m_mapped_te.lower_bound(mr_rel_start);
 
                 // Check the previous interval (it might still match)
                 if (it != m.second->m_mapped_te.begin()) {
                     auto prev = std::prev(it);
-                    if (matches_region(prev->first, prev->second.addr_mask, start_range, end_range)) {
+                    // only checking if the start of the region is in the area requested.
+                    if (region_match(mr_rel_start, mr_rel_end, prev->first, prev->second.addr_mask)) {
                         m.second->iommu_unmap(&(prev->second));
                         m.second->m_mapped_te.erase(prev);
                         SCP_TRACE(())("Region removed 0x{:x} (mask 0x{:x})", prev->first, it->second.addr_mask);
@@ -860,8 +877,8 @@ public:
                 }
 
                 // Scan forward while region bases are <= end
-                while (it != m.second->m_mapped_te.end() && it->first <= end_range) {
-                    if (matches_region(it->first, it->second.addr_mask, start_range, end_range)) {
+                while (it != m.second->m_mapped_te.end() && it->first <= mr_rel_end) {
+                    if (region_match(mr_rel_start, mr_rel_end, it->first, it->second.addr_mask)) {
                         m.second->iommu_unmap(&(it->second));
                         it = m.second->m_mapped_te.erase(it); // erase returns next iterator
                         SCP_TRACE(())("Region removed 0x{:x} (mask 0x{:x})", it->first, it->second.addr_mask);
