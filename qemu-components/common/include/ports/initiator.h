@@ -253,11 +253,11 @@ protected:
                     alias->set_installed();
                     iommumr->m_dmi_aliases_io[alias->get_start()] = alias;
                 }
-
+                auto mask = iommumr->min_page_sz;
                 te->target_as = iommumr->m_as_io->get_ptr();
-                te->addr_mask = start_msk;
-                te->iova = addr & ~start_msk;
-                te->translated_addr = (addr & ~start_msk) + base_addr;
+                te->addr_mask = mask;
+                te->iova = addr & ~mask;
+                te->translated_addr = (addr & ~mask) + base_addr;
                 te->perm = (qemu::IOMMUMemoryRegion::IOMMUAccessFlags)ldmi_data.get_granted_access();
 
                 SCP_DEBUG(())
