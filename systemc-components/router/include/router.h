@@ -23,6 +23,7 @@
 #if THREAD_SAFE == true
 #include <mutex>
 #include <shared_mutex>
+#include <atomic>
 #endif
 
 #include <cci_configuration>
