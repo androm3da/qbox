@@ -15,6 +15,7 @@
 #include "tlm-extensions/qemu-cpu-hint.h"
 #include "tlm-extensions/qemu-mr-hint.h"
 #include <tlm_sockets_buswidth.h>
+#include <nodiscard.h>
 
 class TlmTargetToQemuBridge : public tlm::tlm_fw_transport_if<>
 {
@@ -140,7 +141,7 @@ public:
         return tlm::TLM_ACCEPTED;
     }
 
-    virtual bool get_direct_mem_ptr(TlmPayload& trans, tlm::tlm_dmi& dmi_data) { return false; }
+    virtual QBOX_NODISCARD bool get_direct_mem_ptr(TlmPayload& trans, tlm::tlm_dmi& dmi_data) { return false; }
 
     virtual unsigned int transport_dbg(TlmPayload& trans)
     {

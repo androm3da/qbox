@@ -22,6 +22,7 @@
 #include <string>
 #include <memory>
 #include <cstring>
+#include <nodiscard.h>
 
 namespace gs {
 
@@ -186,7 +187,7 @@ private:
         return initiator_sockets[id]->transport_dbg(trans);
     }
 
-    bool get_direct_mem_ptr(int id, tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
+    QBOX_NODISCARD bool get_direct_mem_ptr(int id, tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
     {
         SCP_DEBUG(()) << "DMI to " << trans.get_address() << " range " << std::hex << dmi_data.get_start_address()
                       << " - " << std::hex << dmi_data.get_end_address();

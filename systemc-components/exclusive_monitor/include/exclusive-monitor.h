@@ -20,6 +20,7 @@
 #include <tlm-extensions/pathid_extension.h>
 #include <tlm_sockets_buswidth.h>
 #include <module_factory_registery.h>
+#include <nodiscard.h>
 
 /**
  * @class exclusive_monitor
@@ -303,7 +304,7 @@ private:
 
     unsigned int transport_dbg(tlm::tlm_generic_payload& txn) { return back_socket->transport_dbg(txn); }
 
-    bool get_direct_mem_ptr(tlm::tlm_generic_payload& txn, tlm::tlm_dmi& dmi_data)
+    QBOX_NODISCARD bool get_direct_mem_ptr(tlm::tlm_generic_payload& txn, tlm::tlm_dmi& dmi_data)
     {
         uint64_t txn_start;
         uint64_t fixed_start, fixed_end;

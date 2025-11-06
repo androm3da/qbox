@@ -20,6 +20,7 @@
 #include <libgsutils.h>
 #include <module_factory_registery.h>
 #include <tlm_sockets_buswidth.h>
+#include <nodiscard.h>
 
 /**
  * @class Addrtr
@@ -66,7 +67,7 @@ private:
         return r;
     }
 
-    bool get_direct_mem_ptr(tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
+    QBOX_NODISCARD bool get_direct_mem_ptr(tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
     {
         sc_dt::uint64 addr = trans.get_address();
 

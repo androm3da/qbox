@@ -17,6 +17,7 @@
 #include <tlm_utils/simple_target_socket.h>
 #include <module_factory_registery.h>
 #include <tlm_sockets_buswidth.h>
+#include <nodiscard.h>
 
 #include <iomanip>
 
@@ -96,7 +97,7 @@ private:
         return initiator_socket->transport_dbg(trans);
     }
 
-    bool get_direct_mem_ptr(tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
+    QBOX_NODISCARD bool get_direct_mem_ptr(tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
     {
         SCP_INFO(()) << "calling get_direct_mem_ptr: " << scp::scp_txn_tostring(trans);
         return initiator_socket->get_direct_mem_ptr(trans, dmi_data);

@@ -35,6 +35,7 @@
 #include <router_if.h>
 #include <module_factory_registery.h>
 #include <tlm_sockets_buswidth.h>
+#include <nodiscard.h>
 
 namespace gs {
 
@@ -230,7 +231,7 @@ private:
         return ret;
     }
 
-    bool get_direct_mem_ptr(int id, tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
+    QBOX_NODISCARD bool get_direct_mem_ptr(int id, tlm::tlm_generic_payload& trans, tlm::tlm_dmi& dmi_data)
     {
         std::lock_guard<std::mutex> lock(m_dmi_mutex);
         sc_dt::uint64 addr = trans.get_address();

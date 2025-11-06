@@ -25,6 +25,7 @@
 #include <module_factory_registery.h>
 #include <tlm_sockets_buswidth.h>
 #include <unordered_map>
+#include <nodiscard.h>
 
 #ifndef _WIN32
 #include <fcntl.h>
@@ -209,7 +210,7 @@ private:
     cci::cci_broker_handle m_broker;
 
 protected:
-    virtual bool get_direct_mem_ptr(int id, tlm::tlm_generic_payload& txn, tlm::tlm_dmi& dmi_data)
+    virtual QBOX_NODISCARD bool get_direct_mem_ptr(int id, tlm::tlm_generic_payload& txn, tlm::tlm_dmi& dmi_data)
     {
         if (!p_dmi) return false;
         sc_dt::uint64 addr = txn.get_address();
