@@ -3368,7 +3368,7 @@ public:
             regs[i] = regs_access_info[i].reset;
         }
 
-        unsigned int num_pages_log2 = 31 - clz32(p_num_cb);
+        unsigned int num_pages_log2 = 31 - clz32(p_num_pages);
         ARRAY_FIELD_DP32(regs, SMMU_SIDR0, ATOSNS, p_ato);
         ARRAY_FIELD_DP32(regs, SMMU_SIDR0, NUMSMRG, p_num_smr);
         ARRAY_FIELD_DP32(regs, SMMU_SIDR1, NUMCB, p_num_cb);
@@ -3383,7 +3383,7 @@ public:
                 for (int i = 0; i < R_MAX; i++) {
                     regs[i] = regs_access_info[i].reset;
                 }
-                unsigned int num_pages_log2 = 31 - clz32(p_num_cb);
+                unsigned int num_pages_log2 = 31 - clz32(p_num_pages);
                 ARRAY_FIELD_DP32(regs, SMMU_SIDR0, ATOSNS, p_ato);
                 ARRAY_FIELD_DP32(regs, SMMU_SIDR0, NUMSMRG, p_num_smr);
                 ARRAY_FIELD_DP32(regs, SMMU_SIDR1, NUMCB, p_num_cb);
