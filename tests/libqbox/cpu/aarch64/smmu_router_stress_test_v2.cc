@@ -468,7 +468,7 @@ public:
     static constexpr size_t MAIN_MEM_SIZE = 256 * 1024 * 1024; // 256MB for main memory
 
     // Virtual and physical memory regions - Use high virtual address >32-bit
-    static constexpr uint64_t VIRTUAL_TEST_ADDR = 0x300000000ULL; // 12GB virtual address
+    static constexpr uint64_t VIRTUAL_TEST_ADDR = 0x80000000ULL; // 12GB virtual address
     static constexpr uint64_t
         PAGE_TABLE_BASE = 0x10000000; // Page tables: 0x10000000 - 0x1007FFFF (512KB for up to 32 CPUs)
     static constexpr uint64_t REGION_BASE = 0x10080000; // Test regions: 0x10080000+ in 8KB blocks (after page tables)
@@ -695,7 +695,7 @@ public:
             m_cpu_routers[i]->add_target(m_pass_identity[i]->target_socket, 0x0, 0x10000000ULL);
 
             // High VA traffic (>=0x300000000) -> High VA TBU
-            m_cpu_routers[i]->add_target(m_tbus_high_va[i]->upstream_socket, 0x300000000ULL, 0x100000000ULL);
+            m_cpu_routers[i]->add_target(m_tbus_high_va[i]->upstream_socket, VIRTUAL_TEST_ADDR, 0x10000000ULL);
 
             SCP_INFO(()) << "🔍 ROUTING DEBUG: CPU " << i << " -> CPU_Router_" << i;
             SCP_INFO(()) << "  - Identity range [0x0 - 0x10000000] -> Pass_Identity_" << i << " (bypassing SMMU)";

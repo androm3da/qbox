@@ -2,9 +2,9 @@ qbox_add_cpu_test(hexagon-ld-st-mmio-test 100 ld-st-mmio.cc)
 qbox_add_cpu_test(hexagon-reset-test 100 hex-reset.cc)
 
 # Build assembly firmware for Hexagon SMMU stress test
-find_program(LLVM_MC llvm-mc)
+find_program(LLVM_MC llvm-mc HINTS /opt/homebrew/opt/llvm/bin)
 find_program(LLD ld.lld)
-find_program(LLVM_OBJCOPY llvm-objcopy)
+find_program(LLVM_OBJCOPY llvm-objcopy HINTS /opt/homebrew/opt/llvm/bin)
 
 # Check if LLVM tools are available for building Hexagon firmware
 if(LLVM_MC AND LLD AND LLVM_OBJCOPY)

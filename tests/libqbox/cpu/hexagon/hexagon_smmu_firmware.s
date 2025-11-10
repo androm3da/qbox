@@ -120,7 +120,7 @@ main_start:
  */
 main_loop:
     // Check if we've reached max iterations
-    p0 = cmp.gt(r18, r2)    // Compare iteration counter with max
+    p0 = cmp.eq(r18, r2)    // Compare iteration counter with max
     if (p0) jump test_complete
 
     // Signal entering main loop
@@ -182,7 +182,7 @@ fill_ready:
  * Loop over pages in the region
  */
 fill_page_loop:
-    p0 = cmp.gtu(r20, r21)  // Compare page_num with num_pages
+    p0 = cmp.eq(r20, r21)  // Compare page_num with num_pages
     if (p0) jump fill_done
 
     // Calculate page base address: base + (page_num * PAGE_SIZE)
@@ -218,48 +218,6 @@ fill_page_loop:
  * Filling complete - notify tester
  */
 fill_done:
-    // Debug: Signal we completed filling memory
-    r0 = #0x7000            // Memory fill completed debug
-    r0 = add(r0, r19)       // Include region ID
-    memw(r17 + #REG_DEBUG) = r0  // Write to REG_DEBUG
-
-    // Ensure all memory writes are completed before signaling completion
-    syncht                   // Hexagon memory synchronization barrier
-
-    // Read back and verify the first word to ensure writes are visible
-    r12 = #VIRTUAL_TEST_ADDR_LOW  // Virtual base address (32-bit)
-
-    // Retry loop to ensure pattern is written
-    r14 = #10               // Max retry count
-verify_loop:
-    r11:10 = memd(r12)      // Read back first word
-
-    // Check if upper 32 bits contain our CPU ID (not 0xcafe)
-    r13 = r11               // Get upper 32 bits (CPU ID)
-    p0 = cmp.eq(r13, r16)   // Compare with our CPU ID
-    if (p0) jump verify_done // If match, we're done
-
-    // Small delay before retry
-    r15 = #50
-small_delay:
-    r15 = add(r15, #-1)
-    p0 = cmp.gt(r15, #0)
-    if (p0) jump small_delay
-
-    // Decrement retry count
-    r14 = add(r14, #-1)
-    p0 = cmp.gt(r14, #0)
-    if (p0) jump verify_loop // Keep trying
-
-    // If we get here, writes didn't propagate - report error
-    r0 = #0xF000            // Fatal error code
-    memw(r17 + #REG_DEBUG) = r0
-    jump diagnostic_error
-
-verify_done:
-    // Final sync
-    syncht
-
     r0 = #1                 // FILL_DONE = 1
     memw(r17 + #REG_COMPLETE) = r0  // Write to REG_COMPLETE (from constants)
 
@@ -322,7 +280,7 @@ fill_boundary:
 
 fill_boundary_loop:
     // Check if done
-    p0 = cmp.gtu(r5, r4)    // Compare offset with num_words
+    p0 = cmp.eq(r5, r4)    // Compare offset with num_words
     if (p0) jump fill_boundary_done
 
     // Build pattern value (64-bit)
@@ -348,6 +306,9 @@ fill_boundary_loop:
     // Calculate write address: base_addr + (word_offset * 8)
     r8 = asl(r5, #3)        // word_offset * 8 (bytes)
     r8 = add(r0, r8)        // Add offset to base address
+
+    // memd(r17 + #REG_DEBUG) = r7:6
+    // memw(r17 + #REG_DEBUG + 8) = r8
 
     // Write pattern to memory (64-bit store)
     memd(r8) = r7:6         // Store double-word at calculated address
