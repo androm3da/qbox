@@ -27,6 +27,7 @@
 #include <gs_memory.h>
 #include <smmu500.h>
 #include <tlm_utils/simple_initiator_socket.h>
+#include <tlm-extensions/pathid_extension.h>
 #include <pass.h>
 
 /*
@@ -199,6 +200,18 @@ public:
         uint64_t addr = trans.get_address();
         uint32_t cpu_id = static_cast<uint32_t>(addr / REG_SIZE_PER_CPU);
         uint64_t reg_offset = addr % REG_SIZE_PER_CPU;
+
+        gs::PathIDExtension* ext = nullptr;
+        trans.get_extension(ext);
+        sc_assert(ext);
+        // 0,1 , 4,5 , 8,9 is CPU_0, 2, 4, ....
+        // 2,3 , 6,7 , 10,11 is CPU_1, 3, 5, ....
+        uint32_t port_id=ext->at(1);
+        sc_assert(cpu_id == port_id>>2);
+        cpu_id=port_id>>=1;
+
+        SCP_DEBUG(())("Came through port {}, giving CPU_ID {}",ext->at(1), cpu_id);
+
 
         if (cpu_id >= m_num_cpus) {
             trans.set_response_status(tlm::TLM_ADDRESS_ERROR_RESPONSE);
