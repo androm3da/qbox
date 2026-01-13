@@ -49,6 +49,7 @@ file(
 )
 include(${CMAKE_CURRENT_BINARY_DIR}/cmake/CPM.cmake)
 include(${PROJECT_SOURCE_DIR}/cmake/boilerplate.cmake)
+include(${PROJECT_SOURCE_DIR}/cmake/linker_map.cmake)
 
 macro(determine_qemu_git_path)
     string(FIND "${GREENSOCS_GIT}" "github" GITHUB_URL)
@@ -298,6 +299,9 @@ add_library(${PROJECT_NAME} SHARED
         ${qemu_srcs}
 )
 
+# Generate linker map for the main library
+gs_generate_linker_map(${PROJECT_NAME})
+
 build_lua()
 
 if (NOT WITHOUT_QEMU)
@@ -407,7 +411,7 @@ if (NOT WITHOUT_QEMU)
 
     install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/qemu-components" DESTINATION ${CMAKE_INSTALL_PREFIX})
     set(QEMU_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/qemu-components")
-   
+
 endif() # WITHOUT_QEMU
 
 if(CMAKE_COMPILER_IS_GNUCC)
@@ -447,7 +451,7 @@ target_link_libraries(${PROJECT_NAME} PUBLIC
         ${CROW_DEP}
         zip
         ${PYBIND11_EMBED}
-        ${CMAKE_DL_LIBS}  
+        ${CMAKE_DL_LIBS}
 )
 
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/systemc-components" DESTINATION ${CMAKE_INSTALL_PREFIX})
@@ -458,7 +462,7 @@ gs_export(${PROJECT_NAME} ${QBOX_INCLUDE_DIR})
 if (NOT DEFINED GS_ONLY)
     install(TARGETS rpc zip DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
 endif()
-    
+
 list(APPEND TARGET_LIBS ${PROJECT_NAME})
 
 if(NOT WITHOUT_QEMU)
