@@ -1,6 +1,9 @@
 # Linker map file generation support for various linkers
 # Supports: ld.lld (LLVM), ld.bfd (GNU), ld64 (Apple)
 
+# Find Python3 for running the analysis script
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+
 # Function to enable linker map generation for a target
 function(gs_generate_linker_map TARGET)
     # Determine the linker being used
@@ -48,10 +51,11 @@ function(gs_generate_linker_map TARGET)
         )
     endif()
 
-    # Create a custom target to ensure the map file is generated
+    # Create a custom target to ensure the map file is generated and analyzed
     add_custom_command(
         TARGET ${TARGET} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "Linker map generated: ${MAP_FILE}"
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/get_libs.py ${MAP_FILE}
         VERBATIM
     )
 
