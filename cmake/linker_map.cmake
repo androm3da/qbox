@@ -4,6 +4,10 @@
 # Find Python3 for running the analysis script
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
+# Store the path to the scripts directory relative to this cmake file
+# This works correctly even when QBox is used as a CPM dependency
+set(QBOX_SCRIPTS_DIR "${CMAKE_CURRENT_LIST_DIR}/../scripts")
+
 # Function to enable linker map generation for a target
 function(gs_generate_linker_map TARGET)
     # Determine the linker being used
@@ -55,7 +59,7 @@ function(gs_generate_linker_map TARGET)
     add_custom_command(
         TARGET ${TARGET} POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E echo "Linker map generated: ${MAP_FILE}"
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/scripts/get_libs.py ${MAP_FILE}
+        COMMAND ${Python3_EXECUTABLE} ${QBOX_SCRIPTS_DIR}/get_libs.py ${MAP_FILE}
         VERBATIM
     )
 
