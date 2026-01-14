@@ -11,6 +11,7 @@ import json
 import re
 import os
 import argparse
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
@@ -66,58 +67,155 @@ class GnuLdMapParser(MapFileParser):
             with open(self.map_file, 'r') as f:
                 content = f.read()
 
-            # Look for the "As-needed library included" section
-            as_needed_pattern = re.compile(
-                r'As-needed library included.*?\n\n(.*?)(?:\n\n|$)',
-                re.DOTALL | re.MULTILINE
+            # Check if this is LLVM lld detailed format by looking for VMA/LMA header
+            if 'VMA              LMA     Size Align' in content:
+                return self._parse_lld_detailed_format(content)
+            else:
+                return self._parse_gnu_ld_format(content)
+
+        except (OSError, IOError, UnicodeDecodeError) as e:
+            print(f"Error parsing GNU ld map file: {e}", file=sys.stderr)
+
+        return {
+            "local_libraries": sorted(list(self.local_libs)),
+            "system_libraries": sorted(list(self.system_libs))
+        }
+
+    def _parse_lld_detailed_format(self, content: str) -> Dict[str, List[str]]:
+        """Parse LLVM lld detailed format map file."""
+        # In lld detailed format, we need to infer dependencies from build artifact references
+        # Look for patterns like "_deps/xxx-build/libxxx.so" in the object file paths
+
+        # Find all _deps references which indicate CMake-managed dependencies
+        deps_pattern = re.compile(r'_deps/([^/]+)-build/([^/\s:]+)')
+        for match in deps_pattern.finditer(content):
+            dep_name = match.group(1)  # e.g., "fmt", "systemc"
+            lib_artifact = match.group(2)  # e.g., "libfmt.so.9.1.0"
+
+            # Build the full path for the library
+            full_path = f"_deps/{dep_name}-build/{lib_artifact}"
+            if any(lib_artifact.endswith(ext) for ext in ['.so', '.a', '.dylib']):
+                self.local_libs.add(full_path)
+
+        # Look for standalone library names that might be inferred
+        # Sometimes we can find library names in the build directory structure
+        standalone_libs = set()
+        lib_name_pattern = re.compile(r'_deps/([^/]+)-build/.*?(lib\w+\.so[.\d]*)')
+        for match in lib_name_pattern.finditer(content):
+            dep_name = match.group(1)
+            lib_file = match.group(2)
+            standalone_libs.add(lib_file)
+
+        # Add common standalone library names we can infer
+        for lib in standalone_libs:
+            self.local_libs.add(lib)
+
+        # For system libraries, we need to check what's being dynamically linked
+        # This is harder with lld detailed format, but we can look for common system paths
+        # that might appear in debug info or other sections
+        system_lib_pattern = re.compile(r'(/usr/lib[^/\s]*|/lib[^/\s]*)/([^/\s]+\.so[.\d]*)')
+        for match in system_lib_pattern.finditer(content):
+            lib_path = match.group(0)
+            self.system_libs.add(lib_path)
+
+        # Since lld detailed format doesn't include runtime dependencies,
+        # try to extract them from the actual binary if it exists
+        self._extract_runtime_dependencies()
+
+        return {
+            "local_libraries": sorted(list(self.local_libs)),
+            "system_libraries": sorted(list(self.system_libs))
+        }
+
+    def _extract_runtime_dependencies(self):
+        """Extract runtime dependencies using readelf/objdump on the actual binary."""
+        # Try to find the corresponding binary for this map file
+        map_path = Path(self.map_file)
+
+        # Common patterns for finding the binary from map file path
+        possible_binaries = [
+            map_path.with_suffix(''),  # Remove .map extension
+            map_path.with_suffix('.so'),
+            map_path.with_suffix('.exe'),
+            map_path.parent / map_path.stem,  # map file stem in same directory
+            map_path.parent / ('lib' + map_path.stem + '.so'),  # libname.so
+            map_path.parent / (map_path.stem + '.exe'),  # name.exe
+        ]
+
+        for binary_path in possible_binaries:
+            if binary_path.exists():
+                self._extract_dependencies_from_binary(binary_path)
+                break
+
+    def _extract_dependencies_from_binary(self, binary_path: Path):
+        """Extract dependencies from a binary using readelf."""
+        try:
+            # Use readelf to get dynamic dependencies
+            result = subprocess.run(
+                ['readelf', '-d', str(binary_path)],
+                capture_output=True,
+                text=True,
+                timeout=10
             )
 
-            as_needed_match = as_needed_pattern.search(content)
-            if as_needed_match:
-                libs_section = as_needed_match.group(1)
-                # Parse library entries
-                lib_pattern = re.compile(r'^(\S+)\s+(\S+)', re.MULTILINE)
-                for match in lib_pattern.finditer(libs_section):
-                    lib_name = match.group(1)
-                    source_file = match.group(2)
+            if result.returncode == 0:
+                # Parse NEEDED entries from readelf output
+                for line in result.stdout.splitlines():
+                    if 'NEEDED' in line and 'Shared library:' in line:
+                        # Extract library name from format: "0x... (NEEDED) Shared library: [libname.so.x]"
+                        match = re.search(r'\[([^\]]+)\]', line)
+                        if match:
+                            lib_name = match.group(1)
 
-                    # Check if it's a system library by name pattern first
-                    system_lib_patterns = [
-                        r'^libc\.so',
-                        r'^libm\.so',
-                        r'^libdl\.so',
-                        r'^libpthread\.so',
-                        r'^librt\.so',
-                        r'^libgcc',
-                        r'^libstdc\+\+',
-                        r'^ld-linux',
-                        r'^ld\.so',
-                    ]
+                            # Classify as system or local library
+                            system_lib_patterns = [
+                                r'^libc\.so',
+                                r'^libm\.so',
+                                r'^libdl\.so',
+                                r'^libpthread\.so',
+                                r'^librt\.so',
+                                r'^libgcc',
+                                r'^libstdc\+\+',
+                                r'^ld-linux',
+                                r'^ld\.so',
+                                r'^libelf\.so',
+                                r'^libz\.so',
+                                r'^libpython',
+                                r'^libmvec\.so',
+                            ]
 
-                    base_name = os.path.basename(lib_name)
-                    is_system_by_name = any(re.match(pattern, base_name) for pattern in system_lib_patterns)
+                            is_system = any(re.match(pattern, lib_name) for pattern in system_lib_patterns)
 
-                    if is_system_by_name or self.is_system_library(lib_name):
-                        self.system_libs.add(lib_name)
-                    else:
-                        self.local_libs.add(lib_name)
+                            if is_system:
+                                self.system_libs.add(lib_name)
+                            elif any(local_name in lib_name for local_name in ['qbox', 'qemu', 'fmt', 'systemc', 'cci', 'rpc', 'zip', 'lua']):
+                                self.local_libs.add(lib_name)
+                            else:
+                                # Default unknown libraries to system
+                                self.system_libs.add(lib_name)
 
-            # Also look for LOAD commands which indicate linked libraries
-            load_pattern = re.compile(r'LOAD\s+(\S+)')
-            for match in load_pattern.finditer(content):
-                lib_path = match.group(1)
-                if lib_path and not lib_path.endswith('.o'):
-                    if self.is_system_library(lib_path):
-                        self.system_libs.add(lib_path)
-                    else:
-                        self.local_libs.add(lib_path)
+        except (subprocess.TimeoutExpired, subprocess.SubprocessError, FileNotFoundError):
+            # readelf might not be available or binary might not be readable
+            pass
 
-            # Look for shared library dependencies in dynamic section
-            dynamic_pattern = re.compile(r'NEEDED\s+(\S+)')
-            for match in dynamic_pattern.finditer(content):
+    def _parse_gnu_ld_format(self, content: str) -> Dict[str, List[str]]:
+        """Parse traditional GNU ld format map file."""
+        # Look for the "As-needed library included" section
+        as_needed_pattern = re.compile(
+            r'As-needed library included.*?\n\n(.*?)(?:\n\n|$)',
+            re.DOTALL | re.MULTILINE
+        )
+
+        as_needed_match = as_needed_pattern.search(content)
+        if as_needed_match:
+            libs_section = as_needed_match.group(1)
+            # Parse library entries
+            lib_pattern = re.compile(r'^(\S+)\s+(\S+)', re.MULTILINE)
+            for match in lib_pattern.finditer(libs_section):
                 lib_name = match.group(1)
-                # NEEDED entries are typically just the library name, not full path
-                # Common system libraries pattern
+                source_file = match.group(2)
+
+                # Check if it's a system library by name pattern first
                 system_lib_patterns = [
                     r'^libc\.so',
                     r'^libm\.so',
@@ -130,15 +228,48 @@ class GnuLdMapParser(MapFileParser):
                     r'^ld\.so',
                 ]
 
-                is_system = any(re.match(pattern, lib_name) for pattern in system_lib_patterns)
+                base_name = os.path.basename(lib_name)
+                is_system_by_name = any(re.match(pattern, base_name) for pattern in system_lib_patterns)
 
-                if is_system or (lib_name.startswith('lib') and not any(local in lib_name for local in ['qbox', 'qemu'])):
+                if is_system_by_name or self.is_system_library(lib_name):
                     self.system_libs.add(lib_name)
                 else:
                     self.local_libs.add(lib_name)
 
-        except Exception as e:
-            print(f"Error parsing GNU ld map file: {e}", file=sys.stderr)
+        # Also look for LOAD commands which indicate linked libraries
+        load_pattern = re.compile(r'LOAD\s+(\S+)')
+        for match in load_pattern.finditer(content):
+            lib_path = match.group(1)
+            if lib_path and not lib_path.endswith('.o'):
+                if self.is_system_library(lib_path):
+                    self.system_libs.add(lib_path)
+                else:
+                    self.local_libs.add(lib_path)
+
+        # Look for shared library dependencies in dynamic section
+        dynamic_pattern = re.compile(r'NEEDED\s+(\S+)')
+        for match in dynamic_pattern.finditer(content):
+            lib_name = match.group(1)
+            # NEEDED entries are typically just the library name, not full path
+            # Common system libraries pattern
+            system_lib_patterns = [
+                r'^libc\.so',
+                r'^libm\.so',
+                r'^libdl\.so',
+                r'^libpthread\.so',
+                r'^librt\.so',
+                r'^libgcc',
+                r'^libstdc\+\+',
+                r'^ld-linux',
+                r'^ld\.so',
+            ]
+
+            is_system = any(re.match(pattern, lib_name) for pattern in system_lib_patterns)
+
+            if is_system or (lib_name.startswith('lib') and not any(local in lib_name for local in ['qbox', 'qemu'])):
+                self.system_libs.add(lib_name)
+            else:
+                self.local_libs.add(lib_name)
 
         return {
             "local_libraries": sorted(list(self.local_libs)),
@@ -183,7 +314,7 @@ class Ld64MapParser(MapFileParser):
                             else:
                                 self.local_libs.add(file_ref)
 
-        except Exception as e:
+        except (OSError, IOError, UnicodeDecodeError) as e:
             print(f"Error parsing ld64 map file: {e}", file=sys.stderr)
 
         return {
@@ -206,7 +337,7 @@ def detect_map_format(map_file: str) -> MapFileParser:
             # Default to GNU ld format (also works for lld)
             return GnuLdMapParser(map_file)
 
-    except Exception as e:
+    except (OSError, IOError, UnicodeDecodeError) as e:
         print(f"Error detecting map format: {e}", file=sys.stderr)
         # Default to GNU format
         return GnuLdMapParser(map_file)
@@ -270,7 +401,7 @@ def main():
         with open(output_file, 'w') as f:
             json.dump(result, f, indent=2)
         print(f"Dependencies written to: {output_file}")
-    except Exception as e:
+    except (OSError, IOError, PermissionError) as e:
         print(f"Error writing output file: {e}", file=sys.stderr)
         sys.exit(1)
 
