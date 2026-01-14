@@ -10,6 +10,12 @@ set(QBOX_SCRIPTS_DIR "${CMAKE_CURRENT_LIST_DIR}/../scripts")
 
 # Function to enable linker map generation for a target
 function(gs_generate_linker_map TARGET)
+    # Check if target exists
+    if(NOT TARGET ${TARGET})
+        message(FATAL_ERROR "gs_generate_linker_map called with non-existent target '${TARGET}'\n"
+                            "Make sure to call gs_generate_linker_map() AFTER the target is created with add_executable() or add_library()")
+    endif()
+
     # Determine the linker being used
     if(CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
         # Clang on non-Apple platforms typically uses lld or can use bfd
@@ -34,6 +40,21 @@ function(gs_generate_linker_map TARGET)
     # Get the target type
     get_target_property(TARGET_TYPE ${TARGET} TYPE)
 
+    # Check if this is an INTERFACE library
+    if(TARGET_TYPE STREQUAL "INTERFACE_LIBRARY")
+        message(STATUS "Skipping linker map generation for INTERFACE library '${TARGET}'")
+        return()
+    endif()
+
+    # Only generate maps for executables and shared/static libraries
+    if(NOT (TARGET_TYPE STREQUAL "EXECUTABLE" OR
+            TARGET_TYPE STREQUAL "SHARED_LIBRARY" OR
+            TARGET_TYPE STREQUAL "STATIC_LIBRARY" OR
+            TARGET_TYPE STREQUAL "MODULE_LIBRARY"))
+        message(STATUS "Skipping linker map generation for target '${TARGET}' of type '${TARGET_TYPE}'")
+        return()
+    endif()
+
     # Set the map file path
     set(MAP_FILE "${CMAKE_CURRENT_BINARY_DIR}/${TARGET}.map")
 
@@ -56,12 +77,23 @@ function(gs_generate_linker_map TARGET)
     endif()
 
     # Create a custom target to ensure the map file is generated and analyzed
-    add_custom_command(
-        TARGET ${TARGET} POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E echo "Linker map generated: ${MAP_FILE}"
-        COMMAND ${Python3_EXECUTABLE} ${QBOX_SCRIPTS_DIR}/get_libs.py ${MAP_FILE}
-        VERBATIM
-    )
+    # Check if the get_libs.py script exists (it might not when QBox is a dependency)
+    if(EXISTS "${QBOX_SCRIPTS_DIR}/get_libs.py")
+        add_custom_command(
+            TARGET ${TARGET} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo "Linker map generated: ${MAP_FILE}"
+            COMMAND ${Python3_EXECUTABLE} ${QBOX_SCRIPTS_DIR}/get_libs.py ${MAP_FILE}
+            VERBATIM
+        )
+    else()
+        add_custom_command(
+            TARGET ${TARGET} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E echo "Linker map generated: ${MAP_FILE}"
+            COMMAND ${CMAKE_COMMAND} -E echo "Note: Dependency analysis script not found at ${QBOX_SCRIPTS_DIR}/get_libs.py"
+            COMMAND ${CMAKE_COMMAND} -E echo "      Run manually: python3 <qbox>/scripts/get_libs.py ${MAP_FILE}"
+            VERBATIM
+        )
+    endif()
 
     # Set a property to track that this target has a map file
     set_target_properties(${TARGET} PROPERTIES
